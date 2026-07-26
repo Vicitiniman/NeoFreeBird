@@ -141,9 +141,38 @@ def main() -> None:
     theme_source = (ROOT / "src" / "Hooks" / "Theme.x").read_text(
         encoding="utf-8"
     )
-    for required in ("UIUserInterfaceIdiomPad", '@"twitter_bird"'):
+    for required in (
+        "UIUserInterfaceIdiomPad",
+        "BHTUpdateAdaptiveRailBranding",
+    ):
         if required not in theme_source:
             raise AssertionError(f"Missing compatibility fix: {required}")
+
+    branding_source = (
+        ROOT / "src" / "Branding" / "BHTBranding.m"
+    ).read_text(encoding="utf-8")
+    if '@"twitter_bird"' not in branding_source:
+        raise AssertionError("Central Twitter bird asset lookup is missing")
+
+    launch_source = (
+        ROOT / "src" / "Hooks" / "AppLifecycle.x"
+    ).read_text(encoding="utf-8")
+    if "applyClassicLaunchBird" not in launch_source:
+        raise AssertionError("Classic launch bird replacement is missing")
+
+    likes_source = (
+        ROOT / "src" / "Likes" / "BHTLikesTab.m"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "TFNMenuSheetViewController",
+        "UIPercentDrivenInteractiveTransition",
+        'BHTPhotoURLForVariant(rawURL, @"medium")',
+        "totalCostLimit = 128 * 1024 * 1024",
+    ):
+        if required not in likes_source:
+            raise AssertionError(
+                f"Missing Likes media improvement: {required}"
+            )
 
     print(
         f"Source smoke test passed ({len(setting_keys)} settings, "

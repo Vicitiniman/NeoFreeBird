@@ -359,7 +359,7 @@
 "EXPAND_TCO_LINKS_TITLE" = "Expand t.co links";
 "EXPAND_TCO_LINKS_DETAIL" = "Use the destination URL shown by X instead of its t.co wrapper.";
 "RESTORE_LAUNCH_ANIMATION_TITLE" = "Classic launch animation";
-"RESTORE_LAUNCH_ANIMATION_DETAIL" = "Use the logo zoom and fade without X's cut-out reveal mask.";
+"RESTORE_LAUNCH_ANIMATION_DETAIL" = "Use the classic Twitter bird zoom and fade without X's cut-out reveal mask.";
 "RESTORE_REFRESH_SOUNDS_TITLE" = "Pull-to-refresh sounds";
 "RESTORE_REFRESH_SOUNDS_DETAIL" = "Play the classic pull and pop sounds during a manual refresh.";
 "REMEMBER_TIMELINE_TAB_TITLE" = "Remember timeline tab";
@@ -367,6 +367,8 @@
 "ENABLE_LIKES_TAB_TITLE" = "My Likes bottom tab";
 "ENABLE_LIKES_TAB_DETAIL" = "Legacy preference retained for compatibility reports. Use Custom navigation to show or hide My Likes.";
 "LIKES_MEDIA_WATERFALL_TITLE" = "Liked-media waterfall";
+"LIKES_MEDIA_ACTIONS_TITLE" = "Liked media";
+"LIKES_VIEW_POST_ACTION_TITLE" = "View post and replies";
 "LIKES_MEDIA_WATERFALL_DETAIL" = "Add a Posts/Media selector with a pinch-adjustable 2–5 column gallery.";
 "LIKES_NAVIGATION_EDITOR_TITLE" = "Edit Likes navigation bar";
 "LIKES_NAVIGATION_SETTINGS_TITLE" = "Likes navigation";

@@ -4,6 +4,8 @@
 //
 
 #import "HookHelpers.h"
+#import "Branding/BHTBranding.h"
+#import <stdlib.h>
 
 // MARK: - Padlock helpers
 
@@ -319,6 +321,8 @@ static void presentAuthIfNeeded(void) {
 // (revealMaskLayer / holePathInView); detach it so the logo zoom is kept but
 // the splash simply fades out.
 
+static char kBHTOriginalLaunchLogoImageKey;
+
 static void stripLaunchRevealMask(UIView* view) {
     // The X-shaped hole lives on the container subview's layer.mask; the top
     // view itself is unmasked, but clear it too for safety.
@@ -328,6 +332,126 @@ static void stripLaunchRevealMask(UIView* view) {
     }
 }
 
+static UIImageView* launchImageViewFromCandidate(id candidate) {
+    if ([candidate isKindOfClass:UIImageView.class]) {
+        return candidate;
+    }
+    if (![candidate isKindOfClass:UIView.class]) return nil;
+
+    __block UIImageView* nestedImage = nil;
+    EnumerateSubviewsRecursively(candidate, ^(UIView* subview) {
+        if (!nestedImage &&
+            [subview isKindOfClass:UIImageView.class]) {
+            nestedImage = (UIImageView*)subview;
+        }
+    });
+    return nestedImage;
+}
+
+static UIImageView* launchLogoImageView(UIView* launchView) {
+    // X 12.9's Swift implementation stores a lazy `logoView`. Prefer that
+    // stable semantic path when it is Objective-C visible, then fall back to
+    // the centered square image in the launch-only hierarchy.
+    for (NSString* selectorName in
+         @[@"logoView", @"logoImageView", @"xLogoImageView"]) {
+        SEL selector = NSSelectorFromString(selectorName);
+        if (![launchView respondsToSelector:selector]) continue;
+        id candidate = nil;
+        @try {
+            candidate =
+                ((id (*)(id, SEL))objc_msgSend)(launchView, selector);
+        } @catch (__unused NSException* exception) {
+        }
+        UIImageView* candidateImage =
+            launchImageViewFromCandidate(candidate);
+        if (candidateImage) return candidateImage;
+    }
+
+    // The Swift field is named `$__lazy_storage_$_logoView` in X 12.9 and may
+    // not have an Objective-C getter. Resolve object ivars by their semantic
+    // name before using geometry as the final compatibility fallback.
+    for (Class currentClass = launchView.class;
+         currentClass && currentClass != UIView.class;
+         currentClass = class_getSuperclass(currentClass)) {
+        unsigned int count = 0;
+        Ivar* ivars = class_copyIvarList(currentClass, &count);
+        for (unsigned int index = 0; index < count; index++) {
+            Ivar ivar = ivars[index];
+            const char* name = ivar_getName(ivar);
+            const char* type = ivar_getTypeEncoding(ivar);
+            if (!name || !type || type[0] != '@') continue;
+            NSString* ivarName =
+                [NSString stringWithUTF8String:name].lowercaseString;
+            if (![ivarName containsString:@"logoview"]) continue;
+            id candidate = nil;
+            @try {
+                candidate = object_getIvar(launchView, ivar);
+            } @catch (__unused NSException* exception) {
+            }
+            UIImageView* candidateImage =
+                launchImageViewFromCandidate(candidate);
+            if (candidateImage) {
+                free(ivars);
+                return candidateImage;
+            }
+        }
+        free(ivars);
+    }
+
+    CGPoint center =
+        CGPointMake(CGRectGetMidX(launchView.bounds),
+                    CGRectGetMidY(launchView.bounds));
+    __block UIImageView* best = nil;
+    __block CGFloat bestScore = CGFLOAT_MAX;
+    EnumerateSubviewsRecursively(launchView, ^(UIView* candidate) {
+        if (![candidate isKindOfClass:UIImageView.class] ||
+            candidate.hidden || candidate.alpha < 0.05) {
+            return;
+        }
+        UIImageView* imageView = (UIImageView*)candidate;
+        CGRect rect =
+            [imageView convertRect:imageView.bounds toView:launchView];
+        CGFloat width = CGRectGetWidth(rect);
+        CGFloat height = CGRectGetHeight(rect);
+        if (width < 18.0 || height < 18.0 ||
+            width > 180.0 || height > 180.0 ||
+            fabs(width - height) > 20.0) {
+            return;
+        }
+        CGFloat score =
+            hypot(CGRectGetMidX(rect) - center.x,
+                  CGRectGetMidY(rect) - center.y);
+        if (score < bestScore) {
+            best = imageView;
+            bestScore = score;
+        }
+    });
+    return best;
+}
+
+static UIColor* launchLogoColor(UITraitCollection* traits) {
+    if (@available(iOS 13.0, *)) {
+        if (traits.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return UIColor.whiteColor;
+        }
+    }
+    return CurrentAccentColor();
+}
+
+static void applyClassicLaunchBird(UIView* launchView) {
+    UIImageView* logoView = launchLogoImageView(launchView);
+    if (!logoView) return;
+    if (!objc_getAssociatedObject(logoView,
+                                  &kBHTOriginalLaunchLogoImageKey) &&
+        logoView.image) {
+        objc_setAssociatedObject(
+            logoView, &kBHTOriginalLaunchLogoImageKey,
+            logoView.image, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    BHTApplyTwitterBirdToImageView(
+        logoView, launchLogoColor(launchView.traitCollection));
+}
+
 %hook T1AnimatedLaunchScreenView
 
 - (void)layoutSubviews {
@@ -335,6 +459,7 @@ static void stripLaunchRevealMask(UIView* view) {
     // layoutSubviews re-installs the mask each pass, so re-strip after %orig.
     if ([BHTSettings boolForKey:@"restore_launch_animation"]) {
         stripLaunchRevealMask((UIView*)self);
+        applyClassicLaunchBird((UIView*)self);
     }
 }
 
@@ -344,15 +469,20 @@ static void stripLaunchRevealMask(UIView* view) {
         return;
     }
     stripLaunchRevealMask((UIView*)self);
+    applyClassicLaunchBird((UIView*)self);
 
     [UIView animateWithDuration:0.5
                      animations:^{
                          for (UIView* sub in ((UIView*)self).subviews) {
                              sub.backgroundColor = [UIColor clearColor];
                          }
-                     }];
+    }];
 
     %orig;
+    // The stock reveal path can refresh the Swift logo view synchronously.
+    // Reapply both pieces after it has configured its animation.
+    stripLaunchRevealMask((UIView*)self);
+    applyClassicLaunchBird((UIView*)self);
 }
 
 %end

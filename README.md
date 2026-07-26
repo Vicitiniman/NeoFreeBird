@@ -23,18 +23,23 @@ X 12.9.
   X's adaptive expanded layout instead of using the iPhone collapse clamp.
 - A Posts/Media view for Likes with a pinch-adjustable waterfall gallery,
   newest-first loading, continuous pagination, original-quality photo viewing,
-  highest-available MP4 playback, long-press photo Download/Share, and
-  swipe-down dismissal.
+  highest-available MP4 playback, X-native long-press actions for photos,
+  videos, and GIFs in both views, and interactive swipe-down dismissal.
 - Sideloaded and TrollStore builds install with the **Twitter** display name and
   include the supplied classic bird as a selectable app icon. The blue Home
-  title logo can also use the classic bird instead of the X glyph.
+  title logo, iPad navigation rail, and classic launch animation can also use
+  the bird instead of the X glyph.
 - Updated profile, search, Grok, timeline, confirmation, appearance, branding,
   custom-font, and accessibility-related features.
 - Settings are grouped into named subsections for navigation, ads, media,
   privacy, profiles, tweets, and links.
 - A runtime compatibility report that can be shared from the Debug settings.
 
-Beta 14 fixes iPad rail sizing, removes the first-frame Bookmarks label from My
+Beta 15 extends the bird branding to the iPad rail and classic launch animation,
+adds native waterfall and close-up media sheets, replaces the pushed media
+viewer with a fluid percent-driven modal dismissal, and bounds/downsamples its
+image cache for faster scrolling and lower memory use. Beta 14 fixes iPad rail
+sizing, removes the first-frame Bookmarks label from My
 Likes, replaces the blue X Home title with the classic Twitter bird, organizes
 the settings pages, isolates temporary media cleanup to NeoFreeBird-owned
 files, and hardens settings, app-lock, photo-save, and compatibility-report

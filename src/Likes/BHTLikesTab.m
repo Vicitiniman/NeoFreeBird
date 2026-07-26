@@ -2,11 +2,11 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <AVKit/AVKit.h>
+#import <ImageIO/ImageIO.h>
 #import <mach-o/dyld.h>
 #import <math.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
-#import <Photos/Photos.h>
 #import <QuartzCore/QuartzCore.h>
 #import <string.h>
 
@@ -48,6 +48,10 @@ static NSMutableDictionary* BHTMutableLikesDiagnostics(void) {
             @"activityHistoryInitialTab": @4,
             @"navigationMode": @"nativeBookmarksCarrier",
             @"photoRequestVariant": @"orig",
+            @"waterfallPreviewVariant": @"medium",
+            @"waterfallActionSheet": @"TFNMenuSheetViewController",
+            @"viewerDismissal": @"percentDrivenModal",
+            @"decodedImageCacheLimitMB": @128,
             @"videoVariantPolicy": @"highestBitrateMP4",
             @"rootHookInstalled": @YES,
             @"nativeRootCreations": @0,
@@ -231,6 +235,8 @@ static UIViewController* BHTMakeNativeLikesController(id account) {
 @property(nonatomic, strong) NSURL* previewURL;
 @property(nonatomic, strong) NSURL* originalURL;
 @property(nonatomic, strong) NSURL* videoURL;
+@property(nonatomic, strong) id mediaEntity;
+@property(nonatomic) BHTMediaActionKind mediaActionKind;
 @property(nonatomic) CGFloat aspectRatio;
 @property(nonatomic) long long statusID;
 @property(nonatomic, copy) NSString* statusText;
@@ -240,7 +246,8 @@ static UIViewController* BHTMakeNativeLikesController(id account) {
 @implementation BHTLikedMediaItem
 @end
 
-static NSURL* BHTOriginalPhotoURL(NSString* rawURL) {
+static NSURL* BHTPhotoURLForVariant(NSString* rawURL,
+                                    NSString* variant) {
     if (rawURL.length == 0) return nil;
     NSURLComponents* components = [NSURLComponents componentsWithString:rawURL];
     if (!components) return [NSURL URLWithString:rawURL];
@@ -260,9 +267,38 @@ static NSURL* BHTOriginalPhotoURL(NSString* rawURL) {
     if (!hasFormat && extension.length > 0) {
         [items addObject:[NSURLQueryItem queryItemWithName:@"format" value:extension]];
     }
-    [items addObject:[NSURLQueryItem queryItemWithName:@"name" value:@"orig"]];
+    [items addObject:
+        [NSURLQueryItem queryItemWithName:@"name"
+                                    value:variant.length ? variant : @"orig"]];
     components.queryItems = items;
     return components.URL ?: [NSURL URLWithString:rawURL];
+}
+
+static NSURL* BHTOriginalPhotoURL(NSString* rawURL) {
+    return BHTPhotoURLForVariant(rawURL, @"orig");
+}
+
+static NSURL* BHTWaterfallPreviewURL(NSString* rawURL) {
+    // 1200 px is sharp enough for a two-column iPad grid while avoiding an
+    // original-size network transfer and decode for every thumbnail.
+    return BHTPhotoURLForVariant(rawURL, @"medium");
+}
+
+static BHTMediaActionKind BHTMediaActionKindForEntity(id media) {
+    NSInteger mediaType = [BHTSafeValue(media, @"mediaType") integerValue];
+    if (mediaType == 2) return BHTMediaActionKindGIF;
+    id videoInfo = BHTSafeValue(media, @"videoInfo");
+    NSArray* variants = BHTSafeValue(videoInfo, @"variants");
+    if (mediaType == 3 || variants.count > 0) {
+        for (id variant in variants) {
+            NSString* URLString = BHTSafeValue(variant, @"url");
+            if ([URLString containsString:@"/tweet_video/"]) {
+                return BHTMediaActionKindGIF;
+            }
+        }
+        return BHTMediaActionKindVideo;
+    }
+    return BHTMediaActionKindPhoto;
 }
 
 static long long BHTVariantScore(id variant) {
@@ -384,13 +420,14 @@ static NSArray<BHTLikedMediaItem*>* BHTMediaItemsFromSections(NSArray* sections)
 
                 BHTLikedMediaItem* model = [BHTLikedMediaItem new];
                 model.identifier = identifier;
-                // The waterfall deliberately uses the original image too. A
-                // tap must not be the point where a low-resolution thumbnail
-                // finally changes to the full variant.
-                model.previewURL = originalURL ?:
+                model.previewURL =
+                    BHTWaterfallPreviewURL(mediaURL) ?:
                     (mediaURL.length ? [NSURL URLWithString:mediaURL] : nil);
                 model.originalURL = originalURL ?: model.previewURL;
                 model.videoURL = videoURL;
+                model.mediaEntity = media;
+                model.mediaActionKind =
+                    BHTMediaActionKindForEntity(media);
                 model.aspectRatio = (width > 0 && height > 0) ? width / height : 1.0;
                 model.statusID = statusID;
                 model.statusText = BHTReadableStatusText(status);
@@ -532,96 +569,354 @@ static NSCache<NSURL*, UIImage*>* BHTMediaImageCache(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         cache = [NSCache new];
-        cache.countLimit = 250;
+        cache.countLimit = 160;
+        cache.totalCostLimit = 128 * 1024 * 1024;
     });
     return cache;
 }
 
-static NSString* BHTPhotoFileExtension(NSURL* sourceURL,
-                                       NSURLResponse* response) {
-    NSString* extension = response.suggestedFilename.pathExtension;
-    if (extension.length == 0) extension = sourceURL.pathExtension;
-    if (extension.length == 0) {
-        NSURLComponents* components =
-            [NSURLComponents componentsWithURL:sourceURL
-                       resolvingAgainstBaseURL:NO];
-        for (NSURLQueryItem* item in components.queryItems ?: @[]) {
-            if ([item.name.lowercaseString isEqualToString:@"format"] &&
-                item.value.length > 0) {
-                extension = item.value;
-                break;
-            }
-        }
-    }
-    extension = extension.lowercaseString;
-    NSCharacterSet* invalid =
-        [NSCharacterSet.alphanumericCharacterSet invertedSet];
-    extension =
-        [[extension componentsSeparatedByCharactersInSet:invalid]
-            componentsJoinedByString:@""];
-    return extension.length > 0 ? extension : @"jpg";
+static NSUInteger BHTDecodedImageCost(UIImage* image) {
+    CGImageRef CGImage = image.CGImage;
+    return CGImage
+               ? CGImageGetBytesPerRow(CGImage) *
+                     CGImageGetHeight(CGImage)
+               : 0;
 }
 
-static void BHTDownloadOriginalPhoto(
-    NSURL* sourceURL,
-    void (^completion)(NSURL* temporaryURL, NSError* error)) {
-    if (!sourceURL) {
-        NSError* error =
-            [NSError errorWithDomain:@"com.bhtwitter.likes"
-                                code:1
-                            userInfo:@{
-                                NSLocalizedDescriptionKey:
-                                    @"The original photo URL is unavailable."
-                            }];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(nil, error);
-        });
+static void BHTCacheImage(UIImage* image, NSURL* URL) {
+    if (!image || !URL) return;
+    [BHTMediaImageCache() setObject:image
+                            forKey:URL
+                              cost:BHTDecodedImageCost(image)];
+}
+
+static UIImage* BHTDownsampledImage(NSData* data,
+                                    CGFloat maximumPixelDimension) {
+    if (data.length == 0) return nil;
+    NSDictionary* sourceOptions = @{
+        (NSString*)kCGImageSourceShouldCache: @NO
+    };
+    CGImageSourceRef source =
+        CGImageSourceCreateWithData((__bridge CFDataRef)data,
+                                    (__bridge CFDictionaryRef)sourceOptions);
+    if (!source) return nil;
+
+    CGFloat maximum =
+        MAX(320.0, MIN(maximumPixelDimension, 4096.0));
+    NSDictionary* thumbnailOptions = @{
+        (NSString*)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+        (NSString*)kCGImageSourceCreateThumbnailWithTransform: @YES,
+        (NSString*)kCGImageSourceShouldCacheImmediately: @YES,
+        (NSString*)kCGImageSourceThumbnailMaxPixelSize: @(maximum)
+    };
+    CGImageRef thumbnail =
+        CGImageSourceCreateThumbnailAtIndex(
+            source, 0, (__bridge CFDictionaryRef)thumbnailOptions);
+    CFRelease(source);
+    if (!thumbnail) return nil;
+    UIImage* image = [UIImage imageWithCGImage:thumbnail
+                                         scale:UIScreen.mainScreen.scale
+                                   orientation:UIImageOrientationUp];
+    CGImageRelease(thumbnail);
+    return image;
+}
+
+static CGFloat BHTTargetPixelsForView(UIView* view,
+                                      CGFloat qualityMultiplier) {
+    CGFloat points = MAX(CGRectGetWidth(view.bounds),
+                         CGRectGetHeight(view.bounds));
+    UIScreen* screen = view.window.screen ?: UIScreen.mainScreen;
+    if (points < 1.0) {
+        points = MAX(CGRectGetWidth(screen.bounds),
+                     CGRectGetHeight(screen.bounds));
+    }
+    CGFloat scale = screen.scale;
+    return MAX(640.0, points * scale * qualityMultiplier);
+}
+
+static void BHTOpenLikedMediaPost(BHTLikedMediaItem* item) {
+    if (!item) return;
+    BHTIncrementLikesDiagnostic(@"postRouteAttempts");
+    NSURL* appURL =
+        item.statusID > 0
+            ? [NSURL URLWithString:
+                  [NSString stringWithFormat:@"twitter://status?id=%lld",
+                                             item.statusID]]
+            : nil;
+    NSURL* fallback = item.statusURL;
+    UIApplication* application = UIApplication.sharedApplication;
+    if (!appURL) {
+        if (fallback) {
+            [application openURL:fallback
+                          options:@{}
+                completionHandler:^(BOOL success) {
+                    if (success) {
+                        BHTIncrementLikesDiagnostic(
+                            @"postURLAcceptances");
+                    }
+                }];
+        }
+        return;
+    }
+    [application openURL:appURL
+                  options:@{}
+        completionHandler:^(BOOL success) {
+            if (success) {
+                BHTIncrementLikesDiagnostic(@"postURLAcceptances");
+            } else if (fallback) {
+                [application openURL:fallback
+                              options:@{}
+                    completionHandler:^(BOOL fallbackSuccess) {
+                        if (fallbackSuccess) {
+                            BHTIncrementLikesDiagnostic(
+                                @"postURLAcceptances");
+                        }
+                    }];
+            }
+        }];
+}
+
+static void BHTPresentActivityItemsAttempt(
+    NSArray* activityItems,
+    UIViewController* presenter,
+    UIView* sourceView,
+    NSUInteger attempt) {
+    if (activityItems.count == 0) return;
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW,
+                      (int64_t)((attempt == 0 ? 0.18 : 0.08) *
+                                NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+        UIViewController* top = topMostController();
+        Class menuSheetClass =
+            NSClassFromString(@"TFNMenuSheetViewController");
+        BOOL menuStillClosing =
+            (menuSheetClass &&
+             [top isKindOfClass:menuSheetClass]) ||
+            top.isBeingDismissed;
+        UIViewController* visiblePresenter =
+            presenter.view.window ? presenter : top;
+        BOOL presenterBusy =
+            visiblePresenter.presentedViewController != nil ||
+            visiblePresenter.isBeingPresented ||
+            visiblePresenter.isBeingDismissed;
+        if (menuStillClosing || presenterBusy) {
+            if (attempt < 8) {
+                BHTPresentActivityItemsAttempt(
+                    activityItems, presenter, sourceView,
+                    attempt + 1);
+            }
+            return;
+        }
+        if (!visiblePresenter) return;
+        UIActivityViewController* share =
+            [[UIActivityViewController alloc]
+                initWithActivityItems:activityItems
+                applicationActivities:nil];
+        UIPopoverPresentationController* popover =
+            share.popoverPresentationController;
+        if (popover) {
+            UIView* anchor = sourceView.window ? sourceView
+                                              : visiblePresenter.view;
+            popover.sourceView = anchor;
+            popover.sourceRect = anchor.bounds;
+        }
+        [visiblePresenter presentViewController:share
+                                       animated:YES
+                                     completion:nil];
+    });
+}
+
+static void BHTPresentActivityItems(NSArray* activityItems,
+                                    UIViewController* presenter,
+                                    UIView* sourceView) {
+    BHTPresentActivityItemsAttempt(
+        activityItems, presenter, sourceView, 0);
+}
+
+static void BHTPresentLikedMediaActionSheet(
+    UIViewController* presenter,
+    BHTLikedMediaItem* item,
+    UIView* sourceView) {
+    if (!presenter || !item || !sourceView ||
+        presenter.presentedViewController) {
         return;
     }
 
-    NSURLSessionDownloadTask* task =
-        [[NSURLSession sharedSession]
-            downloadTaskWithURL:sourceURL
-              completionHandler:^(NSURL* location, NSURLResponse* response,
-                                  NSError* error) {
-        NSHTTPURLResponse* httpResponse =
-            [response isKindOfClass:NSHTTPURLResponse.class]
-                ? (NSHTTPURLResponse*)response
-                : nil;
-        if (!error && httpResponse &&
-            (httpResponse.statusCode < 200 ||
-             httpResponse.statusCode >= 300)) {
-            error =
-                [NSError errorWithDomain:@"com.bhtwitter.likes"
-                                    code:httpResponse.statusCode
-                                userInfo:@{
-                                    NSLocalizedDescriptionKey:
-                                        [NSString stringWithFormat:
-                                            @"The photo server returned HTTP %ld.",
-                                            (long)httpResponse.statusCode]
-                                }];
+    Class actionClass = NSClassFromString(@"TFNActionItem");
+    if (!actionClass ||
+        ![actionClass
+            respondsToSelector:
+                @selector(actionItemWithTitle:action:)] ||
+        ![actionClass
+            respondsToSelector:
+                @selector(actionItemWithTitle:imageName:action:)]) {
+        return;
+    }
+
+    BHTBundle* bundle = [BHTBundle sharedBundle];
+    DownloadInlineButton* downloader = [DownloadInlineButton new];
+    NSMutableArray<TFNActionItem*>* actions =
+        [NSMutableArray array];
+    NSArray* mediaEntities =
+        item.mediaEntity ? @[item.mediaEntity] : @[];
+    BOOL photo = item.mediaActionKind == BHTMediaActionKindPhoto;
+    BOOL GIF = item.mediaActionKind == BHTMediaActionKindGIF;
+
+    if (mediaEntities.count > 0 &&
+        (photo ||
+         [BHTSettings boolForKey:@"download_videos"])) {
+        TFNActionItem* download =
+            [actionClass
+                actionItemWithTitle:
+                    [bundle localizedStringForKey:
+                        photo
+                            ? @"MEDIA_ACTION_DOWNLOAD_PHOTO_MENU_TITLE"
+                            : (GIF
+                                   ? @"MEDIA_ACTION_DOWNLOAD_GIF_MENU_TITLE"
+                                   : @"MEDIA_ACTION_DOWNLOAD_VIDEO_MENU_TITLE")]
+                           imageName:@"arrow_down_circle_stroke"
+                              action:^{
+                                  dispatch_async(
+                                      dispatch_get_main_queue(), ^{
+                                      if (photo) {
+                                          [downloader
+                                              downloadOriginalPhotoMediaEntities:
+                                                  mediaEntities];
+                                      } else {
+                                          [downloader
+                                              presentDownloadOptionsForMediaEntities:
+                                                  mediaEntities];
+                                      }
+                                  });
+                              }];
+        if (download) {
+            BHTMediaActionSetIdentifier(
+                download, BHTMediaActionDownloadIdentifier);
+            [actions addObject:download];
+        }
+    }
+
+    if (mediaEntities.count > 0) {
+        TFNActionItem* shareFile =
+            [actionClass
+                actionItemWithTitle:
+                    [bundle localizedStringForKey:
+                        photo
+                            ? @"MEDIA_ACTION_SHARE_PHOTO_FILE_MENU_TITLE"
+                            : (GIF
+                                   ? @"MEDIA_ACTION_SHARE_GIF_FILE_MENU_TITLE"
+                                   : @"MEDIA_ACTION_SHARE_VIDEO_FILE_MENU_TITLE")]
+                           imageName:@"share_stroke_bold"
+                              action:^{
+                                  dispatch_async(
+                                      dispatch_get_main_queue(), ^{
+                                      if (photo) {
+                                          [downloader
+                                              shareOriginalPhotoMediaEntities:
+                                                  mediaEntities];
+                                      } else {
+                                          [downloader
+                                              shareHighestQualityMediaEntities:
+                                                  mediaEntities];
+                                      }
+                                  });
+                              }];
+        if (shareFile) {
+            BHTMediaActionSetIdentifier(
+                shareFile, BHTMediaActionShareFileIdentifier);
+            [actions addObject:shareFile];
+        }
+    }
+
+    if (item.statusURL) {
+        TFNActionItem* copyLink =
+            [actionClass
+                actionItemWithTitle:
+                    [bundle localizedStringForKey:
+                                @"MEDIA_ACTION_COPY_LINK_TITLE"]
+                              action:^{
+                                  UIPasteboard.generalPasteboard.URL =
+                                      item.statusURL;
+                              }];
+        if (copyLink) {
+            BHTMediaActionSetIdentifier(
+                copyLink, BHTMediaActionCopyLinkIdentifier);
+            [actions addObject:copyLink];
         }
 
-        NSURL* retainedURL = nil;
-        if (!error && location) {
-            NSString* extension =
-                BHTPhotoFileExtension(sourceURL, response);
-            retainedURL =
-                [BHTManager temporaryFileURLWithExtension:extension];
-            NSError* moveError = nil;
-            if (![[NSFileManager defaultManager]
-                    moveItemAtURL:location
-                           toURL:retainedURL
-                           error:&moveError]) {
-                retainedURL = nil;
-                error = moveError;
-            }
+        __weak UIViewController* weakPresenter = presenter;
+        __weak UIView* weakSourceView = sourceView;
+        TFNActionItem* shareVia =
+            [actionClass
+                actionItemWithTitle:
+                    [bundle localizedStringForKey:
+                                @"MEDIA_ACTION_SHARE_VIA_TITLE"]
+                           imageName:@"share_stroke_bold"
+                              action:^{
+                                  BHTPresentActivityItems(
+                                      @[item.statusURL],
+                                      weakPresenter,
+                                      weakSourceView);
+                              }];
+        if (shareVia) {
+            BHTMediaActionSetIdentifier(
+                shareVia, BHTMediaActionShareViaIdentifier);
+            [actions addObject:shareVia];
         }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(retainedURL, error);
-        });
-    }];
-    [task resume];
+
+        TFNActionItem* viewPost =
+            [actionClass
+                actionItemWithTitle:
+                    [bundle localizedStringForKey:
+                                @"LIKES_VIEW_POST_ACTION_TITLE"]
+                              action:^{
+                                  BHTOpenLikedMediaPost(item);
+                              }];
+        if (viewPost) {
+            [actions insertObject:viewPost atIndex:0];
+        }
+    }
+
+    NSArray* configured =
+        BHTMediaActionApplyPreferences(actions,
+                                       item.mediaActionKind);
+    if (configured.count == 0) return;
+
+    Class sheetClass =
+        NSClassFromString(@"TFNMenuSheetViewController");
+    if (!sheetClass ||
+        ![sheetClass
+            instancesRespondToSelector:
+                @selector(initWithTitle:actionItems:)]) {
+        return;
+    }
+
+    TFNMenuSheetViewController* sheet =
+        [[sheetClass alloc]
+            initWithTitle:
+                [bundle localizedStringForKey:
+                            @"LIKES_MEDIA_ACTIONS_TITLE"]
+              actionItems:configured];
+    if (!sheet ||
+        ![sheet
+            respondsToSelector:
+                @selector(tfnPresentedCustomPresentFromViewController:animated:completion:)]) {
+        return;
+    }
+    if ([sheet respondsToSelector:@selector(setShouldPresentAsMenu:)]) {
+        sheet.shouldPresentAsMenu = YES;
+    }
+    if ([sheet respondsToSelector:@selector(setSourceView:)]) {
+        sheet.sourceView = sourceView;
+    }
+    UIImpactFeedbackGenerator* haptic =
+        [[UIImpactFeedbackGenerator alloc]
+            initWithStyle:UIImpactFeedbackStyleMedium];
+    [haptic impactOccurred];
+    [sheet tfnPresentedCustomPresentFromViewController:presenter
+                                              animated:YES
+                                            completion:nil];
 }
 
 @interface BHTMediaPageController : UIViewController <UIScrollViewDelegate>
@@ -631,9 +926,7 @@ static void BHTDownloadOriginalPhoto(
 @property(nonatomic, strong) UIScrollView* scrollView;
 @property(nonatomic, strong) UIImageView* imageView;
 @property(nonatomic, strong) UIButton* playButton;
-@property(nonatomic, strong) UIActivityIndicatorView* activityIndicator;
 @property(nonatomic, strong) NSURLSessionDataTask* task;
-@property(nonatomic) CGPoint mediaActionSourcePoint;
 @end
 
 @implementation BHTMediaPageController
@@ -663,18 +956,31 @@ static void BHTDownloadOriginalPhoto(
     [self.scrollView addSubview:self.imageView];
 
     NSURL* imageURL = self.item.originalURL ?: self.item.previewURL;
-    UIImage* cached = imageURL ? [BHTMediaImageCache() objectForKey:imageURL] : nil;
+    UIImage* cached =
+        imageURL ? [BHTMediaImageCache() objectForKey:imageURL]
+                 : nil;
+    if (!cached && self.item.previewURL) {
+        cached =
+            [BHTMediaImageCache() objectForKey:self.item.previewURL];
+    }
     if (cached) {
         self.imageView.image = cached;
-    } else if (imageURL) {
+    }
+    if (imageURL &&
+        ![BHTMediaImageCache() objectForKey:imageURL]) {
+        CGFloat targetPixels =
+            BHTTargetPixelsForView(self.view, 2.0);
         __weak typeof(self) weakSelf = self;
         self.task = [[NSURLSession sharedSession]
             dataTaskWithURL:imageURL
           completionHandler:^(NSData* data, NSURLResponse* response,
                               NSError* error) {
-            UIImage* image = data ? [UIImage imageWithData:data] : nil;
-            if (image) [BHTMediaImageCache() setObject:image forKey:imageURL];
-            dispatch_async(dispatch_get_main_queue(), ^{ weakSelf.imageView.image = image; });
+            UIImage* image =
+                data ? BHTDownsampledImage(data, targetPixels) : nil;
+            BHTCacheImage(image, imageURL);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (image) weakSelf.imageView.image = image;
+            });
         }];
         [self.task resume];
     }
@@ -700,14 +1006,15 @@ static void BHTDownloadOriginalPhoto(
             [self.playButton.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
             [self.playButton.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor]
         ]];
-    } else {
-        UILongPressGestureRecognizer* longPress =
-            [[UILongPressGestureRecognizer alloc]
-                initWithTarget:self
-                        action:@selector(photoLongPressed:)];
-        longPress.minimumPressDuration = 0.5;
-        [self.imageView addGestureRecognizer:longPress];
     }
+
+    UILongPressGestureRecognizer* longPress =
+        [[UILongPressGestureRecognizer alloc]
+            initWithTarget:self
+                    action:@selector(mediaLongPressed:)];
+    longPress.minimumPressDuration = 0.45;
+    longPress.cancelsTouchesInView = YES;
+    [self.view addGestureRecognizer:longPress];
 }
 
 - (void)dealloc {
@@ -723,265 +1030,13 @@ static void BHTDownloadOriginalPhoto(
                      completion:^{ [player.player play]; }];
 }
 
-- (void)setPreparingPhoto:(BOOL)preparing {
-    if (preparing && !self.activityIndicator) {
-        if (@available(iOS 13.0, *)) {
-            self.activityIndicator =
-                [[UIActivityIndicatorView alloc]
-                    initWithActivityIndicatorStyle:
-                        UIActivityIndicatorViewStyleLarge];
-        } else {
-            self.activityIndicator =
-                [[UIActivityIndicatorView alloc]
-                    initWithActivityIndicatorStyle:
-                        UIActivityIndicatorViewStyleWhiteLarge];
-        }
-        self.activityIndicator.translatesAutoresizingMaskIntoConstraints = NO;
-        self.activityIndicator.color = UIColor.whiteColor;
-        self.activityIndicator.backgroundColor =
-            [UIColor colorWithWhite:0 alpha:0.62];
-        self.activityIndicator.layer.cornerRadius = 12;
-        [self.view addSubview:self.activityIndicator];
-        [NSLayoutConstraint activateConstraints:@[
-            [self.activityIndicator.centerXAnchor
-                constraintEqualToAnchor:self.view.centerXAnchor],
-            [self.activityIndicator.centerYAnchor
-                constraintEqualToAnchor:self.view.centerYAnchor],
-            [self.activityIndicator.widthAnchor constraintEqualToConstant:64],
-            [self.activityIndicator.heightAnchor constraintEqualToConstant:64]
-        ]];
-    }
-    if (preparing) {
-        [self.activityIndicator startAnimating];
-        [self.view bringSubviewToFront:self.activityIndicator];
-    } else {
-        [self.activityIndicator stopAnimating];
-        [self.activityIndicator removeFromSuperview];
-        self.activityIndicator = nil;
-    }
-}
-
-- (BOOL)isCurrentPagerPage {
-    UIViewController* parent = self.parentViewController;
-    if ([parent isKindOfClass:UIPageViewController.class]) {
-        return ((UIPageViewController*)parent)
-                   .viewControllers.firstObject == self &&
-               self.view.window != nil;
-    }
-    return self.view.window != nil;
-}
-
-- (void)showPhotoMessage:(NSString*)title message:(NSString*)message {
-    if (![self isCurrentPagerPage]) return;
-    UIAlertController* alert =
-        [UIAlertController alertControllerWithTitle:title
-                                           message:message
-                                    preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
-                                             style:UIAlertActionStyleDefault
-                                           handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)prepareOriginalPhoto:
-    (void (^)(NSURL* temporaryURL, NSError* error))completion {
-    NSURL* sourceURL = self.item.originalURL ?: self.item.previewURL;
-    [self setPreparingPhoto:YES];
-    __weak typeof(self) weakSelf = self;
-    BHTDownloadOriginalPhoto(
-        sourceURL, ^(NSURL* temporaryURL, NSError* error) {
-            typeof(self) strongSelf = weakSelf;
-            [strongSelf setPreparingPhoto:NO];
-            if (!strongSelf) {
-                if (temporaryURL) {
-                    [[NSFileManager defaultManager]
-                        removeItemAtURL:temporaryURL
-                                 error:nil];
-                }
-                return;
-            }
-            if (completion) completion(temporaryURL, error);
-        });
-}
-
-- (void)downloadCurrentPhoto {
-    __weak typeof(self) weakSelf = self;
-    [self prepareOriginalPhoto:^(NSURL* temporaryURL, NSError* error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        if (error || !temporaryURL) {
-            [strongSelf showPhotoMessage:@"Download failed"
-                                 message:error.localizedDescription ?:
-                                             @"The photo could not be downloaded."];
-            return;
-        }
-
-        void (^savePhoto)(void) = ^{
-            [[PHPhotoLibrary sharedPhotoLibrary]
-                performChanges:^{
-                    [PHAssetChangeRequest
-                        creationRequestForAssetFromImageAtFileURL:
-                            temporaryURL];
-                }
-              completionHandler:^(BOOL success, NSError* saveError) {
-                [[NSFileManager defaultManager]
-                    removeItemAtURL:temporaryURL
-                             error:nil];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    typeof(self) innerSelf = weakSelf;
-                    if (!innerSelf) return;
-                    [innerSelf
-                        showPhotoMessage:
-                            success ? @"Photo saved" : @"Save failed"
-                                  message:
-                            success
-                                ? @"The original-quality photo was saved to Photos."
-                                : (saveError.localizedDescription ?:
-                                       @"The photo could not be saved.")];
-                });
-            }];
-        };
-
-        PHAuthorizationStatus status =
-            [PHPhotoLibrary authorizationStatusForAccessLevel:
-                                PHAccessLevelAddOnly];
-        if (status == PHAuthorizationStatusAuthorized ||
-            status == PHAuthorizationStatusLimited) {
-            savePhoto();
-        } else if (status == PHAuthorizationStatusNotDetermined) {
-            [PHPhotoLibrary
-                requestAuthorizationForAccessLevel:PHAccessLevelAddOnly
-                                           handler:
-                ^(PHAuthorizationStatus requestedStatus) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (requestedStatus == PHAuthorizationStatusAuthorized ||
-                        requestedStatus == PHAuthorizationStatusLimited) {
-                        savePhoto();
-                    } else {
-                        [[NSFileManager defaultManager]
-                            removeItemAtURL:temporaryURL
-                                     error:nil];
-                        [weakSelf
-                            showPhotoMessage:@"Photos access needed"
-                                     message:
-                                @"Allow photo access in Settings to download this photo."];
-                    }
-                });
-            }];
-        } else {
-            [[NSFileManager defaultManager] removeItemAtURL:temporaryURL
-                                                     error:nil];
-            [strongSelf
-                showPhotoMessage:@"Photos access needed"
-                         message:
-                    @"Allow photo access in Settings to download this photo."];
-        }
-    }];
-}
-
-- (void)shareCurrentPhoto {
-    __weak typeof(self) weakSelf = self;
-    [self prepareOriginalPhoto:^(NSURL* temporaryURL, NSError* error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        if (error || !temporaryURL) {
-            [strongSelf showPhotoMessage:@"Share failed"
-                                 message:error.localizedDescription ?:
-                                             @"The photo could not be downloaded."];
-            return;
-        }
-        if (![strongSelf isCurrentPagerPage]) {
-            [[NSFileManager defaultManager] removeItemAtURL:temporaryURL
-                                                     error:nil];
-            return;
-        }
-
-        UIActivityViewController* share =
-            [[UIActivityViewController alloc]
-                initWithActivityItems:@[temporaryURL]
-                applicationActivities:nil];
-        share.completionWithItemsHandler =
-            ^(__unused UIActivityType activityType, __unused BOOL completed,
-              __unused NSArray* returnedItems,
-              __unused NSError* activityError) {
-            [[NSFileManager defaultManager]
-                removeItemAtURL:temporaryURL
-                         error:nil];
-        };
-        UIPopoverPresentationController* popover =
-            share.popoverPresentationController;
-        if (popover) {
-            popover.sourceView = strongSelf.imageView;
-            popover.sourceRect =
-                CGRectMake(strongSelf.mediaActionSourcePoint.x,
-                           strongSelf.mediaActionSourcePoint.y, 1, 1);
-        }
-        [strongSelf presentViewController:share
-                                 animated:YES
-                               completion:nil];
-    }];
-}
-
-- (void)photoLongPressed:(UILongPressGestureRecognizer*)gesture {
+- (void)mediaLongPressed:(UILongPressGestureRecognizer*)gesture {
     if (gesture.state != UIGestureRecognizerStateBegan ||
-        self.item.videoURL || ![self isCurrentPagerPage] ||
-        self.presentedViewController) {
+        self.presentedViewController || !self.view.window) {
         return;
     }
-    self.mediaActionSourcePoint = [gesture locationInView:self.imageView];
-    UIAlertController* menu =
-        [UIAlertController alertControllerWithTitle:nil
-                                           message:nil
-                                    preferredStyle:
-                                        UIAlertControllerStyleActionSheet];
-    __weak typeof(self) weakSelf = self;
-    BHTBundle* bundle = [BHTBundle sharedBundle];
-    UIAlertAction* download =
-        [UIAlertAction
-            actionWithTitle:
-                [bundle localizedStringForKey:
-                            @"MEDIA_ACTION_DOWNLOAD_PHOTO_MENU_TITLE"]
-                     style:UIAlertActionStyleDefault
-                   handler:^(__unused UIAlertAction* action) {
-                       [weakSelf downloadCurrentPhoto];
-                   }];
-    BHTMediaActionSetIdentifier(download,
-                                BHTMediaActionDownloadIdentifier);
-    UIAlertAction* share =
-        [UIAlertAction
-            actionWithTitle:
-                [bundle localizedStringForKey:
-                            @"MEDIA_ACTION_SHARE_PHOTO_FILE_MENU_TITLE"]
-                     style:UIAlertActionStyleDefault
-                   handler:^(__unused UIAlertAction* action) {
-                       [weakSelf shareCurrentPhoto];
-                   }];
-    BHTMediaActionSetIdentifier(share,
-                                BHTMediaActionShareFileIdentifier);
-    NSArray<UIAlertAction*>* configured =
-        BHTMediaActionApplyPreferences(
-            @[download, share], BHTMediaActionKindPhoto);
-    if (configured.count == 0) return;
-    for (UIAlertAction* action in configured) {
-        [menu addAction:action];
-    }
-    [menu
-        addAction:
-            [UIAlertAction
-                actionWithTitle:
-                    [bundle localizedTwitterStringForKey:
-                                @"CANCEL_ACTION_LABEL"]
-                         style:UIAlertActionStyleCancel
-                       handler:nil]];
-    UIPopoverPresentationController* popover =
-        menu.popoverPresentationController;
-    if (popover) {
-        popover.sourceView = self.imageView;
-        popover.sourceRect =
-            CGRectMake(self.mediaActionSourcePoint.x,
-                       self.mediaActionSourcePoint.y, 1, 1);
-    }
-    [self presentViewController:menu animated:YES completion:nil];
+    BHTPresentLikedMediaActionSheet(
+        self, self.item, self.imageView);
 }
 
 - (UIView*)viewForZoomingInScrollView:(UIScrollView*)scrollView {
@@ -990,35 +1045,153 @@ static void BHTDownloadOriginalPhoto(
 
 @end
 
+@interface BHTMediaViewerAnimator
+    : NSObject <UIViewControllerAnimatedTransitioning>
+@property(nonatomic) BOOL presenting;
+@end
+
+@implementation BHTMediaViewerAnimator
+
+- (NSTimeInterval)transitionDuration:
+    (id<UIViewControllerContextTransitioning>)transitionContext {
+    return self.presenting ? 0.28 : 0.34;
+}
+
+- (void)animateTransition:
+    (id<UIViewControllerContextTransitioning>)transitionContext {
+    UIView* container = transitionContext.containerView;
+    UIView* fromView =
+        [transitionContext viewForKey:UITransitionContextFromViewKey];
+    UIView* toView =
+        [transitionContext viewForKey:UITransitionContextToViewKey];
+    NSTimeInterval duration =
+        [self transitionDuration:transitionContext];
+
+    if (self.presenting) {
+        UIViewController* toController =
+            [transitionContext
+                viewControllerForKey:
+                    UITransitionContextToViewControllerKey];
+        toView.frame =
+            [transitionContext finalFrameForViewController:
+                                   toController];
+        toView.alpha = 0;
+        toView.transform =
+            CGAffineTransformConcat(
+                CGAffineTransformMakeTranslation(0, 18),
+                CGAffineTransformMakeScale(0.985, 0.985));
+        [container addSubview:toView];
+        [UIView animateWithDuration:duration
+                              delay:0
+                            options:
+                                UIViewAnimationOptionCurveEaseOut
+                         animations:^{
+            toView.alpha = 1;
+            toView.transform = CGAffineTransformIdentity;
+        }
+                         completion:^(__unused BOOL finished) {
+            BOOL completed =
+                !transitionContext.transitionWasCancelled;
+            if (!completed) [toView removeFromSuperview];
+            [transitionContext
+                completeTransition:completed];
+        }];
+        return;
+    }
+
+    if (toView && !toView.superview) {
+        [container insertSubview:toView belowSubview:fromView];
+    } else if (toView) {
+        [container sendSubviewToBack:toView];
+    }
+    UIViewController* toController =
+        [transitionContext
+            viewControllerForKey:
+                UITransitionContextToViewControllerKey];
+    if (toController && toView) {
+        toView.frame =
+            [transitionContext finalFrameForViewController:
+                                   toController];
+    }
+    if (toView) {
+        toView.transform =
+            CGAffineTransformMakeScale(0.985, 0.985);
+        toView.alpha = 0.92;
+    }
+
+    fromView.layer.masksToBounds = YES;
+    [UIView animateWithDuration:duration
+                          delay:0
+                        options:
+                            UIViewAnimationOptionCurveLinear
+                     animations:^{
+        CGFloat height =
+            MAX(CGRectGetHeight(container.bounds),
+                CGRectGetHeight(fromView.bounds));
+        fromView.transform =
+            CGAffineTransformMakeTranslation(0, height + 24);
+        fromView.layer.cornerRadius = 24;
+        toView.transform = CGAffineTransformIdentity;
+        toView.alpha = 1;
+    }
+                     completion:^(__unused BOOL finished) {
+        BOOL completed =
+            !transitionContext.transitionWasCancelled;
+        fromView.transform = CGAffineTransformIdentity;
+        fromView.layer.cornerRadius = 0;
+        fromView.layer.masksToBounds = NO;
+        toView.transform = CGAffineTransformIdentity;
+        toView.alpha = 1;
+        [transitionContext
+            completeTransition:completed];
+    }];
+}
+
+@end
+
 @interface BHTMediaPagerController : UIViewController <UIPageViewControllerDataSource,
                                                         UIPageViewControllerDelegate,
-                                                        UIGestureRecognizerDelegate>
-- (instancetype)initWithItems:(NSMutableArray<BHTLikedMediaItem*>*)items
+                                                        UIGestureRecognizerDelegate,
+                                                        UIViewControllerTransitioningDelegate>
+- (instancetype)initWithItems:(NSArray<BHTLikedMediaItem*>*)items
                   initialIndex:(NSUInteger)index;
-@property(nonatomic, strong) NSMutableArray<BHTLikedMediaItem*>* items;
+@property(nonatomic, copy) NSArray<BHTLikedMediaItem*>* items;
+@property(nonatomic, copy) NSArray<BHTLikedMediaItem*>* pendingItems;
 @property(nonatomic) NSUInteger currentIndex;
 @property(nonatomic) NSUInteger knownItemCount;
 @property(nonatomic, strong) UIPageViewController* pageController;
 @property(nonatomic, strong) UIButton* postButton;
+@property(nonatomic, strong) UIButton* closeButton;
 @property(nonatomic, strong) UIPanGestureRecognizer* dismissPan;
+@property(nonatomic, strong)
+    UIPercentDrivenInteractiveTransition* dismissalInteraction;
 @property(nonatomic) BOOL completingDismissal;
+@property(nonatomic) BOOL interactiveDismissal;
+@property(nonatomic) BOOL pageTransitionInFlight;
+@property(nonatomic) BOOL pendingMediaUpdate;
 @property(nonatomic, copy) dispatch_block_t loadMoreHandler;
 - (BHTMediaPageController*)pageAtIndex:(NSUInteger)index;
 - (BHTLikedMediaItem*)currentItem;
 - (void)updatePostButton;
 - (void)requestMoreIfNeededAtIndex:(NSUInteger)index;
-- (void)mediaItemsDidUpdate;
+- (void)mediaItemsDidUpdateWithItems:
+    (NSArray<BHTLikedMediaItem*>*)items;
+- (void)applyMediaItemsUpdate;
 @end
 
 @implementation BHTMediaPagerController
 
-- (instancetype)initWithItems:(NSMutableArray<BHTLikedMediaItem*>*)items
+- (instancetype)initWithItems:(NSArray<BHTLikedMediaItem*>*)items
                   initialIndex:(NSUInteger)index {
     if ((self = [super init])) {
-        _items = items;
+        _items = [items copy];
         _currentIndex = MIN(index, items.count > 0 ? items.count - 1 : 0);
         _knownItemCount = items.count;
         self.title = @"Liked media";
+        self.modalPresentationStyle =
+            UIModalPresentationFullScreen;
+        self.modalPresentationCapturesStatusBarAppearance = YES;
+        self.transitioningDelegate = self;
     }
     return self;
 }
@@ -1045,7 +1218,7 @@ static void BHTDownloadOriginalPhoto(
                                                action:@selector(pannedDown:)];
     self.dismissPan.maximumNumberOfTouches = 1;
     self.dismissPan.delegate = self;
-    [self.pageController.view addGestureRecognizer:self.dismissPan];
+    [self.view addGestureRecognizer:self.dismissPan];
     for (UIView* subview in self.pageController.view.subviews) {
         if ([subview isKindOfClass:UIScrollView.class]) {
             // Direction is decided by dismissPan's delegate. A horizontal page
@@ -1088,8 +1261,101 @@ static void BHTDownloadOriginalPhoto(
         [self.postButton.heightAnchor constraintGreaterThanOrEqualToConstant:44],
         [self.postButton.heightAnchor constraintLessThanOrEqualToConstant:116]
     ]];
+
+    self.closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+    self.closeButton.backgroundColor =
+        [UIColor colorWithWhite:0 alpha:0.62];
+    self.closeButton.tintColor = UIColor.whiteColor;
+    self.closeButton.layer.cornerRadius = 22;
+    UIImageSymbolConfiguration* closeConfiguration =
+        [UIImageSymbolConfiguration
+            configurationWithPointSize:18
+                                weight:UIImageSymbolWeightSemibold];
+    [self.closeButton
+        setImage:
+            [UIImage systemImageNamed:@"xmark"
+                        withConfiguration:closeConfiguration]
+        forState:UIControlStateNormal];
+    self.closeButton.accessibilityLabel = @"Close";
+    self.closeButton.userInteractionEnabled = NO;
+    [self.closeButton addTarget:self
+                         action:@selector(closeTapped:)
+               forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.closeButton];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.closeButton.leadingAnchor
+            constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor
+                           constant:12],
+        [self.closeButton.topAnchor
+            constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor
+                           constant:8],
+        [self.closeButton.widthAnchor constraintEqualToConstant:44],
+        [self.closeButton.heightAnchor constraintEqualToConstant:44]
+    ]];
     [self updatePostButton];
     [self requestMoreIfNeededAtIndex:self.currentIndex];
+}
+
+- (BOOL)prefersStatusBarHidden {
+    return YES;
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    self.closeButton.userInteractionEnabled = YES;
+}
+
+- (void)closeTapped:(id)sender {
+    if (self.completingDismissal || self.isBeingPresented ||
+        self.isBeingDismissed || !self.presentingViewController) {
+        return;
+    }
+    self.completingDismissal = YES;
+    [self dismissViewControllerAnimated:YES completion:nil];
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW,
+                      (int64_t)(0.45 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf.view.window &&
+            strongSelf.presentingViewController &&
+            !strongSelf.isBeingDismissed) {
+            strongSelf.completingDismissal = NO;
+            strongSelf.closeButton.userInteractionEnabled = YES;
+        }
+    });
+}
+
+- (id<UIViewControllerAnimatedTransitioning>)
+    animationControllerForPresentedController:
+        (UIViewController*)presented
+                         presentingController:
+        (UIViewController*)presenting
+                             sourceController:
+        (UIViewController*)source {
+    BHTMediaViewerAnimator* animator =
+        [BHTMediaViewerAnimator new];
+    animator.presenting = YES;
+    return animator;
+}
+
+- (id<UIViewControllerAnimatedTransitioning>)
+    animationControllerForDismissedController:
+        (UIViewController*)dismissed {
+    BHTMediaViewerAnimator* animator =
+        [BHTMediaViewerAnimator new];
+    animator.presenting = NO;
+    return animator;
+}
+
+- (id<UIViewControllerInteractiveTransitioning>)
+    interactionControllerForDismissal:
+        (id<UIViewControllerAnimatedTransitioning>)animator {
+    return self.interactiveDismissal
+               ? self.dismissalInteraction
+               : nil;
 }
 
 - (BHTMediaPageController*)visibleMediaPage {
@@ -1102,7 +1368,9 @@ static void BHTDownloadOriginalPhoto(
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer*)gestureRecognizer {
     if (gestureRecognizer != self.dismissPan || self.completingDismissal ||
-        self.presentedViewController) {
+        self.presentedViewController || self.pageTransitionInFlight ||
+        self.isBeingPresented || self.isBeingDismissed ||
+        !self.presentingViewController) {
         return gestureRecognizer != self.dismissPan;
     }
     BHTMediaPageController* visible = [self visibleMediaPage];
@@ -1131,87 +1399,87 @@ static void BHTDownloadOriginalPhoto(
                visible.scrollView.minimumZoomScale + 0.01;
 }
 
-- (void)restoreAfterCancelledDismissal {
-    [UIView animateWithDuration:0.24
-                          delay:0
-         usingSpringWithDamping:0.86
-          initialSpringVelocity:0
-                        options:UIViewAnimationOptionCurveEaseOut |
-                                UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{
-        self.pageController.view.transform = CGAffineTransformIdentity;
-        self.pageController.view.alpha = 1;
-        self.postButton.transform = CGAffineTransformIdentity;
-        self.postButton.alpha = 1;
-    }
-                     completion:nil];
-}
-
 - (void)pannedDown:(UIPanGestureRecognizer*)pan {
     CGFloat translation =
         MAX(0, [pan translationInView:self.view].y);
     CGFloat height = MAX(1, CGRectGetHeight(self.view.bounds));
 
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        self.completingDismissal = YES;
+        self.interactiveDismissal = YES;
+        [self visibleMediaPage].scrollView.scrollEnabled = NO;
+        self.dismissalInteraction =
+            [UIPercentDrivenInteractiveTransition new];
+        self.dismissalInteraction.completionCurve =
+            UIViewAnimationCurveEaseOut;
+        self.dismissalInteraction.completionSpeed = 0.92;
+        [self dismissViewControllerAnimated:YES completion:nil];
+
+        id<UIViewControllerTransitionCoordinator> coordinator =
+            self.transitionCoordinator;
+        if (!coordinator) {
+            [self.dismissalInteraction cancelInteractiveTransition];
+            self.dismissalInteraction = nil;
+            self.interactiveDismissal = NO;
+            self.completingDismissal = NO;
+            [self visibleMediaPage].scrollView.scrollEnabled = YES;
+            return;
+        }
+
+        __weak typeof(self) weakSelf = self;
+        [coordinator
+            animateAlongsideTransition:nil
+                            completion:
+            ^(id<UIViewControllerTransitionCoordinatorContext> context) {
+                typeof(self) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                BOOL cancelled = context.isCancelled;
+                strongSelf.dismissalInteraction = nil;
+                strongSelf.interactiveDismissal = NO;
+                strongSelf.completingDismissal = !cancelled;
+                if (cancelled) {
+                    BHTMediaPageController* visiblePage =
+                        [strongSelf visibleMediaPage];
+                    visiblePage.scrollView.scrollEnabled = YES;
+                    strongSelf.completingDismissal = NO;
+                    if (strongSelf.pendingMediaUpdate) {
+                        [strongSelf applyMediaItemsUpdate];
+                    }
+                }
+            }];
+        return;
+    }
+
     if (pan.state == UIGestureRecognizerStateChanged) {
-        CGFloat progress = MIN(1, translation / (height * 0.72));
-        self.pageController.view.transform =
-            CGAffineTransformMakeTranslation(0, translation);
-        self.pageController.view.alpha = 1 - progress * 0.58;
-        self.postButton.transform =
-            CGAffineTransformMakeTranslation(0, translation);
-        self.postButton.alpha = 1 - progress * 0.72;
+        CGFloat progress =
+            MIN(1, translation / (height * 0.62));
+        [self.dismissalInteraction
+            updateInteractiveTransition:progress];
         return;
     }
 
     if (pan.state == UIGestureRecognizerStateCancelled ||
         pan.state == UIGestureRecognizerStateFailed) {
-        [self restoreAfterCancelledDismissal];
+        self.interactiveDismissal = NO;
+        [self.dismissalInteraction cancelInteractiveTransition];
         return;
     }
     if (pan.state != UIGestureRecognizerStateEnded) return;
 
     CGFloat velocity = [pan velocityInView:self.view].y;
-    CGFloat distanceThreshold =
-        MIN(180, MAX(110, height * 0.18));
+    CGFloat projectedTranslation =
+        translation + velocity * 0.20;
+    BOOL reversing = velocity < -180;
     BOOL shouldDismiss =
-        translation >= distanceThreshold ||
-        (translation >= 45 && velocity >= 900);
-    if (!shouldDismiss) {
-        [self restoreAfterCancelledDismissal];
-        return;
+        !reversing &&
+        (projectedTranslation >= height * 0.22 ||
+         (translation >= 24 && velocity >= 850));
+    self.interactiveDismissal = NO;
+    if (shouldDismiss) {
+        [self.dismissalInteraction finishInteractiveTransition];
+    } else {
+        [self.dismissalInteraction cancelInteractiveTransition];
     }
-
-    self.completingDismissal = YES;
-    self.view.userInteractionEnabled = NO;
-    CGFloat remainingDistance = MAX(0, height - translation);
-    CGFloat dismissalDestination = MAX(height, translation + 80);
-    NSTimeInterval duration =
-        MAX(0.12, MIN(0.28, remainingDistance / MAX(velocity, 1200)));
-    [UIView animateWithDuration:duration
-                          delay:0
-                        options:UIViewAnimationOptionCurveEaseIn |
-                                UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{
-        self.pageController.view.transform =
-            CGAffineTransformMakeTranslation(0, dismissalDestination);
-        self.pageController.view.alpha = 0;
-        self.postButton.transform =
-            CGAffineTransformMakeTranslation(0, dismissalDestination);
-        self.postButton.alpha = 0;
-    }
-                     completion:^(__unused BOOL finished) {
-        UINavigationController* navigation = self.navigationController;
-        if (navigation &&
-            [navigation.viewControllers containsObject:self]) {
-            [navigation popViewControllerAnimated:NO];
-        } else if (self.presentingViewController) {
-            [self dismissViewControllerAnimated:NO completion:nil];
-        } else {
-            self.completingDismissal = NO;
-            self.view.userInteractionEnabled = YES;
-            [self restoreAfterCancelledDismissal];
-        }
-    }];
 }
 
 - (BHTMediaPageController*)pageAtIndex:(NSUInteger)index {
@@ -1243,7 +1511,23 @@ static void BHTDownloadOriginalPhoto(
     }
 }
 
-- (void)mediaItemsDidUpdate {
+- (void)mediaItemsDidUpdateWithItems:
+    (NSArray<BHTLikedMediaItem*>*)items {
+    self.pendingItems = [items copy];
+    if (self.pageTransitionInFlight ||
+        self.completingDismissal) {
+        self.pendingMediaUpdate = YES;
+        return;
+    }
+    [self applyMediaItemsUpdate];
+}
+
+- (void)applyMediaItemsUpdate {
+    self.pendingMediaUpdate = NO;
+    if (self.pendingItems) {
+        self.items = self.pendingItems;
+        self.pendingItems = nil;
+    }
     if (!self.isViewLoaded || self.items.count == 0) return;
     NSUInteger previousCount = self.knownItemCount;
     BHTMediaPageController* visible =
@@ -1256,7 +1540,11 @@ static void BHTDownloadOriginalPhoto(
                 BHTLikedMediaItem* candidate, NSUInteger index, BOOL* stop) {
                 return [candidate.identifier isEqualToString:visibleIdentifier];
             }];
-        if (updatedIndex != NSNotFound) self.currentIndex = updatedIndex;
+        if (updatedIndex != NSNotFound) {
+            self.currentIndex = updatedIndex;
+            visible.index = updatedIndex;
+            visible.item = self.items[updatedIndex];
+        }
     }
     self.currentIndex = MIN(self.currentIndex, self.items.count - 1);
     if (previousCount == 0 || self.currentIndex + 1 >= previousCount) {
@@ -1270,45 +1558,7 @@ static void BHTDownloadOriginalPhoto(
 }
 
 - (void)openCurrentPost:(id)sender {
-    BHTLikedMediaItem* item = [self currentItem];
-    if (!item) return;
-    BHTIncrementLikesDiagnostic(@"postRouteAttempts");
-    NSURL* appURL = item.statusID > 0
-                        ? [NSURL URLWithString:
-                              [NSString stringWithFormat:@"twitter://status?id=%lld",
-                                                         item.statusID]]
-                        : nil;
-    UIApplication* application = UIApplication.sharedApplication;
-    if (!appURL) {
-        if (item.statusURL) {
-            [application openURL:item.statusURL
-                          options:@{}
-                completionHandler:^(BOOL success) {
-                    if (success) {
-                        BHTIncrementLikesDiagnostic(@"postURLAcceptances");
-                    }
-                }];
-        }
-        return;
-    }
-    NSURL* fallback = item.statusURL;
-    [application openURL:appURL
-                  options:@{}
-        completionHandler:^(BOOL success) {
-            if (success) {
-                BHTIncrementLikesDiagnostic(@"postURLAcceptances");
-            }
-            if (!success && fallback) {
-                [application openURL:fallback
-                              options:@{}
-                    completionHandler:^(BOOL fallbackSuccess) {
-                        if (fallbackSuccess) {
-                            BHTIncrementLikesDiagnostic(
-                                @"postURLAcceptances");
-                        }
-                    }];
-            }
-        }];
+    BHTOpenLikedMediaPost([self currentItem]);
 }
 
 - (UIViewController*)pageViewController:(UIPageViewController*)pageViewController
@@ -1325,15 +1575,27 @@ static void BHTDownloadOriginalPhoto(
 }
 
 - (void)pageViewController:(UIPageViewController*)pageViewController
+    willTransitionToViewControllers:
+        (NSArray<UIViewController*>*)pendingViewControllers {
+    self.pageTransitionInFlight = YES;
+}
+
+- (void)pageViewController:(UIPageViewController*)pageViewController
         didFinishAnimating:(BOOL)finished
    previousViewControllers:(NSArray<UIViewController*>*)previousViewControllers
        transitionCompleted:(BOOL)completed {
-    if (!completed) return;
-    BHTMediaPageController* visible =
-        (BHTMediaPageController*)pageViewController.viewControllers.firstObject;
-    self.currentIndex = visible.index;
-    [self updatePostButton];
-    [self requestMoreIfNeededAtIndex:self.currentIndex];
+    self.pageTransitionInFlight = NO;
+    if (completed) {
+        BHTMediaPageController* visible =
+            (BHTMediaPageController*)
+                pageViewController.viewControllers.firstObject;
+        self.currentIndex = visible.index;
+        [self updatePostButton];
+        [self requestMoreIfNeededAtIndex:self.currentIndex];
+    }
+    if (self.pendingMediaUpdate) {
+        [self applyMediaItemsUpdate];
+    }
 }
 
 @end
@@ -1474,6 +1736,14 @@ static UIScrollView* BHTFindScrollableView(UIView* view) {
 
         UIPinchGestureRecognizer* pinch = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(pinched:)];
         [self.collectionView addGestureRecognizer:pinch];
+        UILongPressGestureRecognizer* mediaActions =
+            [[UILongPressGestureRecognizer alloc]
+                initWithTarget:self
+                        action:
+                            @selector(waterfallMediaLongPressed:)];
+        mediaActions.minimumPressDuration = 0.45;
+        mediaActions.cancelsTouchesInView = YES;
+        [self.collectionView addGestureRecognizer:mediaActions];
         [self.collectionView.panGestureRecognizer
             addTarget:self
                action:@selector(cancelInitialResetFromPan:)];
@@ -1642,6 +1912,27 @@ static UIScrollView* BHTFindScrollableView(UIView* view) {
     [self.waterfallLayout invalidateLayout];
 }
 
+- (void)waterfallMediaLongPressed:
+    (UILongPressGestureRecognizer*)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan ||
+        self.collectionView.hidden || self.presentedViewController) {
+        return;
+    }
+    CGPoint location =
+        [gesture locationInView:self.collectionView];
+    NSIndexPath* indexPath =
+        [self.collectionView indexPathForItemAtPoint:location];
+    if (!indexPath ||
+        indexPath.item >= (NSInteger)self.mediaItems.count) {
+        return;
+    }
+    UICollectionViewCell* cell =
+        [self.collectionView cellForItemAtIndexPath:indexPath];
+    UIView* sourceView = cell.contentView ?: self.collectionView;
+    BHTPresentLikedMediaActionSheet(
+        self, self.mediaItems[indexPath.item], sourceView);
+}
+
 - (void)ingestSections:(NSArray*)sections {
     if (sections.count > 0 && self.initialResetMayRearm &&
         self.view.window &&
@@ -1714,7 +2005,8 @@ static UIScrollView* BHTFindScrollableView(UIView* view) {
     self.requestedMore = NO;
     if (changed && self.isViewLoaded) {
         [self.collectionView reloadData];
-        [self.activeMediaPager mediaItemsDidUpdate];
+        [self.activeMediaPager
+            mediaItemsDidUpdateWithItems:self.mediaItems];
     }
 }
 
@@ -1736,9 +2028,12 @@ static UIScrollView* BHTFindScrollableView(UIView* view) {
     } else if (item.previewURL) {
         __weak BHTLikedMediaCell* weakCell = cell;
         NSURL* url = item.previewURL;
+        CGFloat targetPixels =
+            BHTTargetPixelsForView(cell.contentView, 1.2);
         cell.task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData* data, NSURLResponse* response, NSError* error) {
-            UIImage* image = data ? [UIImage imageWithData:data] : nil;
-            if (image) [BHTMediaImageCache() setObject:image forKey:url];
+            UIImage* image =
+                data ? BHTDownsampledImage(data, targetPixels) : nil;
+            BHTCacheImage(image, url);
             dispatch_async(dispatch_get_main_queue(), ^{
                 if ([weakCell.representedURL isEqual:url]) {
                     weakCell.imageView.image = image;
@@ -1761,7 +2056,9 @@ static UIScrollView* BHTFindScrollableView(UIView* view) {
     __weak typeof(self) weakSelf = self;
     viewer.loadMoreHandler = ^{ [weakSelf loadMoreMedia]; };
     self.activeMediaPager = viewer;
-    [self.navigationController pushViewController:viewer animated:YES];
+    [self presentViewController:viewer
+                       animated:YES
+                     completion:nil];
 }
 
 - (void)collectionView:(UICollectionView*)collectionView

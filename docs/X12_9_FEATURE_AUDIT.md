@@ -68,7 +68,7 @@ Status meanings:
 | Appearance | sidebar navigation | New/runtime check | Reorders or hides Profile, Blue, History, Communities, News, Lists, Chat, Notifications, Spaces, and Follower Requests through X 12.9's observable `TwitterDash` array setters while preserving unknown/native rows |
 | Appearance | `tab_bar_theming` | Ported | Native selected/unselected colors |
 | Appearance | `restore_tab_labels` | Updated | Current `T1TabView` title path; the Likes carrier is relabeled before its first selection |
-| Appearance | `restore_launch_animation` | Updated | No longer forced on; strips only the X reveal mask |
+| Appearance | `restore_launch_animation` | Updated | No longer forced on; replaces the animated X with the bundled Twitter bird and removes only the X-shaped reveal mask |
 | Appearance | `restore_refresh_sounds` | Updated | No longer always on |
 | Appearance | `custom_fonts` | Updated | Persists concrete PostScript faces, migrates former family-name selections, and covers both legacy `TFNUIDefaultFontGroup` and X 12.9's SwiftUI `XFontCatalog` |
 | Timeline | `hide_who_to_follow` | Combined | Section model filter plus targeted iPad controller |
@@ -80,7 +80,7 @@ Status meanings:
 | Timeline | `hide_custom_timelines` | Updated | Hides without persisting an empty pinned list |
 | Timeline | `remember_timeline_tab` | Updated | Disabled preference now leaves X's native value alone |
 | Timeline | `enable_likes_tab` | New/runtime check | Independent bottom destination backed by native Likes history; opens raw Activity History tab 4 on X 12.9, guards against delayed native offset restoration on its first presentation without a loading cover, and preserves position on later tab switches |
-| Timeline | `likes_media_waterfall` | New/runtime check | Newest-first native-section media extraction, continuous pagination, original photo URLs, highest-bitrate MP4 selection, 2–5 columns, original-photo Download/Share, and direction-gated swipe-down viewer dismissal |
+| Timeline | `likes_media_waterfall` | New/runtime check | Newest-first native-section media extraction, continuous pagination, medium-size grid previews plus original-quality close-up/download URLs, highest-bitrate MP4 selection, 2–5 columns, native Photo/Video/GIF long-press sheets in both surfaces, and percent-driven modal swipe-down dismissal |
 | Grok | `enable_grok_translations` | Updated | Manual translation gates are no longer forced globally |
 | Grok | `hide_grok_analyze` | Updated | Backend switch plus current button paths |
 | Grok | `hide_grok_sidebar` | Ported | Current navigation model filtering |
@@ -127,7 +127,7 @@ Status meanings:
 | Web | sharing domain | Ported | Applied independently of tracking removal |
 | Web | `always_open_safari` | Updated | Keeps login/2FA flows in-app |
 | Web | `new_inapp_webview` | Ported | Current feature-switch path |
-| Branding | terminology, pill label, Home logo | Updated | Modern bundle/text/tab paths; the blue Home X is replaced with a tintable classic bird, while sideloaded/TrollStore packaging sets localized display names to Twitter and registers the supplied bird as a loose alternate icon without replacing stock icons |
+| Branding | terminology, pill label, bird logos | Updated | Modern bundle/text/tab paths; the Home title, adaptive iPad rail, and optional classic launch animation use one bundled tintable bird, while sideloaded/TrollStore packaging sets localized display names to Twitter and registers the supplied bird as a loose alternate icon without replacing stock icons |
 | Privacy | screenshot toggles | Ported/updated | Detection and branding cleanup are opt-in and grouped with app lock |
 | Debug | FLEX | Ported | Explicit toggle |
 | Debug | compatibility report | New | Exports a non-sensitive JSON runtime probe report |
@@ -169,8 +169,9 @@ The JSON is also written to:
 `Library/Caches/BHTwitter-X12.9-Compatibility.json`
 
 The first device pass should focus on Photo/Video/GIF action ordering, Download
-and temporary-file Share, first-open Likes position, waterfall long-press and
-swipe-down gestures, sidebar hiding/reordering, the native Likes post route, DM
+and temporary-file Share, first-open Likes position, native waterfall and
+close-up long-press sheets, interactive swipe-down cancellation/completion,
+iPad rail and launch birds, sidebar hiding/reordering, the native Likes post route, DM
 save-action plugin, Home/Spaces Swift aliases, source-label model access, and
 highest-video preference. The report's privacy-safe `likesRuntime` section
 records root creation, selection/reset counts, media count, and URL acceptance.
@@ -181,3 +182,8 @@ Beta 14 also restricts launch cleanup to NeoFreeBird's own temporary directory,
 uses asynchronous Photos saves, scopes the font-picker customization, avoids
 stacked app-lock presentations, caches and cancels settings-avatar requests,
 and debounces automatic compatibility reports off the main thread.
+
+Beta 15 bounds decoded waterfall images to a 128 MB cost-aware cache,
+downsamples them with ImageIO, defers pager refreshes during horizontal
+transitions, and uses the app's native menu-sheet components for consistent
+iPhone/iPad media actions.

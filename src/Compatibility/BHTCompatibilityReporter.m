@@ -327,6 +327,8 @@ static NSArray* BHTRuntimeProbes(void) {
         BHTProbe(@"mediaActions", @"UIViewController", @"t1_mediaActivityViewActionItemsForStatus:account:image:mediaInfo:shortTitles:", NO),
         BHTProbe(@"mediaActions", @"UIViewController", @"_t1_actionItemsForStatus:account:shareableEntity:entityURL:source:options:scribeComponent:doneBlock:", NO),
         BHTProbe(@"mediaActions", @"TFNPreviewConfiguration", @"configurationWithPreviewViewControllerBlock:actionItems:sourceView:sourceRect:", YES),
+        BHTProbe(@"mediaActions", @"TFNMenuSheetViewController", @"initWithTitle:actionItems:", NO),
+        BHTProbe(@"mediaActions", @"TFNMenuSheetViewController", @"tfnPresentedCustomPresentFromViewController:animated:completion:", NO),
 
         BHTProbe(@"dmDownloads", @"DMConversation.MessageAttachmentView", @"layoutSubviews", NO),
         BHTProbe(@"dmDownloads", @"DMConversation.MessageSaveActionPlugin", @"init", NO),
@@ -355,6 +357,8 @@ static NSArray* BHTRuntimeProbes(void) {
         BHTProbe(@"home", @"T1FleetLineHeaderController", @"_t1_shouldShowFleetLine", NO),
         BHTProbe(@"home", @"TUIUpdateIndicator", @"_recreatePillControlForContentNotification:hideOnScroll:", NO),
         BHTProbe(@"appearance", @"TwitterHome.HomeDefaultNavigationBarTitleViewPlugin", @"titleView", NO),
+        BHTProbe(@"appearance", @"T1AnimatedLaunchScreenView", @"layoutSubviews", NO),
+        BHTProbe(@"appearance", @"T1AnimatedLaunchScreenView", @"animateRevealWithCompletion:", NO),
         BHTProbe(@"home", @"T1TwitterSwift.URTTimelineTopicCollectionViewModel", @"init", NO),
 
         BHTProbe(@"search", @"TTSRecentSearchesDatastore", @"_tse_setRecentSearch:", NO),
