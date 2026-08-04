@@ -24,6 +24,7 @@ static NSDictionary* BHTDetailedReplyCapture;
 static NSUInteger BHTDetailedReplyRedactionCount;
 static NSUInteger BHTDetailedReplyTruncationCount;
 static BOOL BHTDetailedReplyResponseAccessorsObserved;
+static NSUInteger BHTDetailedReplyCaptureEpoch;
 
 static NSObject* BHTDetailedReplyLock(void) {
     static NSObject* lock;
@@ -42,6 +43,40 @@ static void BHTDetailedReplySetPreference(BOOL enabled) {
          forKey:@"detailed_reply_diagnostics"];
 }
 
+static void BHTDetailedReplyExpireCaptureLocked(void) {
+    BHTDetailedReplyCaptureEpoch++;
+    BHTDetailedReplyArmed = NO;
+    BHTDetailedReplyArmedAt = 0;
+    BHTDetailedReplySessionGeneration = 0;
+    BHTDetailedReplyCaptureStartedAt = 0;
+    BHTDetailedReplyCapture = nil;
+    BHTDetailedReplyRedactionCount = 0;
+    BHTDetailedReplyTruncationCount = 0;
+    BHTDetailedReplyResponseAccessorsObserved = NO;
+    BHTDetailedReplyCaptureState = @"captureExpiredAndCleared";
+    BHTDetailedReplySetPreference(NO);
+}
+
+static void BHTDetailedReplyScheduleExpiryLocked(void) {
+    NSUInteger expectedEpoch = BHTDetailedReplyCaptureEpoch;
+    NSTimeInterval expectedStartedAt = BHTDetailedReplyCaptureStartedAt;
+    dispatch_after(
+        dispatch_time(
+            DISPATCH_TIME_NOW,
+            (int64_t)(BHTDetailedReplyExportLifetime * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+            @synchronized(BHTDetailedReplyLock()) {
+                if (expectedEpoch != BHTDetailedReplyCaptureEpoch ||
+                    expectedStartedAt <= 0 ||
+                    expectedStartedAt !=
+                        BHTDetailedReplyCaptureStartedAt) {
+                    return;
+                }
+                BHTDetailedReplyExpireCaptureLocked();
+            }
+        });
+}
+
 static void BHTDetailedReplyPruneLocked(void) {
     NSTimeInterval now = BHTDetailedReplyNow();
     if (BHTDetailedReplyArmed &&
@@ -57,13 +92,7 @@ static void BHTDetailedReplyPruneLocked(void) {
     if (captureAge > BHTDetailedReplyExportLifetime) {
         // Personal reply data is retained only long enough for the tester to
         // return to Debug settings and explicitly share the detailed report.
-        BHTDetailedReplySessionGeneration = 0;
-        BHTDetailedReplyCaptureStartedAt = 0;
-        BHTDetailedReplyCapture = nil;
-        BHTDetailedReplyRedactionCount = 0;
-        BHTDetailedReplyTruncationCount = 0;
-        BHTDetailedReplyResponseAccessorsObserved = NO;
-        BHTDetailedReplyCaptureState = @"captureExpiredAndCleared";
+        BHTDetailedReplyExpireCaptureLocked();
     } else if (BHTDetailedReplySessionGeneration != 0 &&
                captureAge > BHTDetailedReplyCollectionLifetime) {
         // Stop accepting late callbacks after 90 seconds, while allowing the
@@ -73,7 +102,11 @@ static void BHTDetailedReplyPruneLocked(void) {
             BHTDetailedReplyCaptureState =
                 @"captureCollectionClosedAwaitingExport";
         } else {
+            BHTDetailedReplyCaptureEpoch++;
             BHTDetailedReplyCaptureStartedAt = 0;
+            BHTDetailedReplyRedactionCount = 0;
+            BHTDetailedReplyTruncationCount = 0;
+            BHTDetailedReplyResponseAccessorsObserved = NO;
             BHTDetailedReplyCaptureState = @"captureExpiredWithoutData";
         }
     }
@@ -368,6 +401,7 @@ static NSData* BHTDetailedReplyResponseData(id response) {
 
 void BHTArmDetailedReplyDiagnostics(void) {
     @synchronized(BHTDetailedReplyLock()) {
+        BHTDetailedReplyCaptureEpoch++;
         BHTDetailedReplyArmed = YES;
         BHTDetailedReplyArmedAt = BHTDetailedReplyNow();
         BHTDetailedReplyCaptureStartedAt = 0;
@@ -413,6 +447,7 @@ BOOL BHTDetailedReplyDiagnosticsHasCapture(void) {
 
 void BHTClearDetailedReplyDiagnostics(void) {
     @synchronized(BHTDetailedReplyLock()) {
+        BHTDetailedReplyCaptureEpoch++;
         BHTDetailedReplyArmed = NO;
         BHTDetailedReplyArmedAt = 0;
         BHTDetailedReplyCaptureStartedAt = 0;
@@ -442,6 +477,7 @@ void BHTDetailedReplyDiagnosticsCaptureDecodedResponse(
             BHTDetailedReplySetPreference(NO);
             BHTDetailedReplySessionGeneration = sessionGeneration;
             BHTDetailedReplyCaptureStartedAt = BHTDetailedReplyNow();
+            BHTDetailedReplyScheduleExpiryLocked();
             BHTDetailedReplyCaptureState = @"capturingDecodedResponse";
             accepted = YES;
         } else if (BHTDetailedReplySessionGeneration ==
@@ -620,6 +656,7 @@ void BHTDetailedReplyDiagnosticsCaptureTypedResult(
             BHTDetailedReplySetPreference(NO);
             BHTDetailedReplySessionGeneration = sessionGeneration;
             BHTDetailedReplyCaptureStartedAt = BHTDetailedReplyNow();
+            BHTDetailedReplyScheduleExpiryLocked();
             BHTDetailedReplyCaptureState = @"capturingTypedResult";
             BHTDetailedReplyCapture = @{
                 @"sessionGeneration": @(sessionGeneration),
