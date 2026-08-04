@@ -2,13 +2,15 @@
 //  ReplyDiagnostics.x
 //  NeoFreeBird
 //
-//  Privacy-preserving checkpoints for the X 12.9 reply workflow. Hook
-//  arguments are deliberately forwarded without being inspected or retained.
+//  Privacy-preserving checkpoints for the X 12.9 reply workflow. The standard
+//  report never retains hook arguments. A separately confirmed, one-shot beta
+//  diagnostic may synchronously sanitize the exact typed status/error pair.
 //
 
 #import "Compatibility/BHTCompatibilityReporter.h"
 #import "Core/BHTSettings.h"
 #import "HookHelpers.h"
+#import "Reply/BHTDetailedReplyDiagnostics.h"
 #import "Reply/BHTWebReplyFallback.h"
 
 #import <objc/message.h>
@@ -107,6 +109,35 @@ static id BHTCurrentNativeAccountForWebReply(void) {
     BHTRecordReplyWorkflowDiagnostic(
         BHTReplyWorkflowDiagnosticReplyActionTapped);
     %orig;
+}
+
+%end
+
+%end
+
+%group BHTReplyTypedUpdateStatusDiagnosticHooks
+
+%hook TFNTwitterCompositionUpdateStatusOperation
+
+- (void)_tfn_main_statusesUpdateCommandDidUpdateStatus:
+            (__unsafe_unretained id)status
+                                                   error:
+            (__unsafe_unretained id)error {
+    if (BHTReplyWorkflowApplicationDiagnosticWindowMayBeActive()) {
+        @try {
+            NSUInteger sessionGeneration = 0;
+            if (BHTReplyWorkflowDiagnosticSessionForApplicationResponse(
+                    &sessionGeneration)) {
+                BHTDetailedReplyDiagnosticsCaptureTypedResult(
+                    sessionGeneration,
+                    @"updateStatusCommandCompletion",
+                    status,
+                    error);
+            }
+        } @catch (__unused NSException* exception) {
+        }
+    }
+    %orig(status, error);
 }
 
 %end
@@ -317,6 +348,15 @@ static id BHTCurrentNativeAccountForWebReply(void) {
             NSSelectorFromString(@"_t1_sendCompositions:"),
             1)) {
         %init(BHTReplySendCompositionsCheckpointHooks);
+    }
+
+    Class updateStatusOperation = NSClassFromString(
+        @"TFNTwitterCompositionUpdateStatusOperation");
+    SEL updateStatusSelector = NSSelectorFromString(
+        @"_tfn_main_statusesUpdateCommandDidUpdateStatus:error:");
+    if (BHTReplyDiagnosticMethodHasObjectArguments(
+            updateStatusOperation, updateStatusSelector, 2)) {
+        %init(BHTReplyTypedUpdateStatusDiagnosticHooks);
     }
 
     Class container = NSClassFromString(

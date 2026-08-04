@@ -60,6 +60,10 @@ NSURL* BHTCompatibilityReportURL(void);
 void BHTWriteCompatibilityReport(void);
 void BHTWriteCompatibilityReportAsync(
     void (^completion)(NSURL* _Nullable reportURL));
+// Writes a temporary, explicitly requested report containing the one-shot
+// sensitive reply capture. It never replaces the standard cached report.
+void BHTWriteDetailedCompatibilityReportAsync(
+    void (^completion)(NSURL* _Nullable reportURL));
 void BHTRecordForYouFilterDiagnostic(
     BHTForYouFilterDiagnosticEvent event);
 // Records fixed workflow stages only. The two terminal failure observers may

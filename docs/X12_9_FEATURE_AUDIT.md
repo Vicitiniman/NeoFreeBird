@@ -380,6 +380,36 @@ accounts, request or response contents, headers, cookies, or tokens. Its
 process-temporal correlation is not request-identity-bound, and its category
 cannot by itself establish whether a reply was persisted.
 
+Beta 49 adds a temporary, explicitly confirmed one-shot diagnostic for the
+remaining native-reply investigation. It does not weaken or replace the three
+privacy-bounded sections above. When armed from Debug settings, only the next
+active X 12.9 native reply may be accepted, and the switch consumes itself as
+soon as the exact HTTPS API-host `CreateTweet` decoder checkpoint runs. X's
+decoder is still called first and its model and error outputs are forwarded
+unchanged. The diagnostic then obtains the same bounded response bytes X has
+already retained through the verified inherited `response.info.data`
+accessors, parses them as JSON, and keeps a recursively bounded copy. Raw
+non-JSON data is omitted. The same capture may add the post-prepare error
+values, the exact Objective-C status/error pair received by
+`TFNTwitterCompositionUpdateStatusOperation`, and the terminal failure
+notification payload for the matching process-local reply generation. It
+does not invoke the generic Swift assimilation ABI or unbox `__SwiftValue`.
+
+This mode can contain reply text returned by X, account handles and IDs,
+post/conversation/media IDs, GraphQL data, and private error descriptions. Its
+warning says so before arming. Response data is capped at 256 KiB; recursive
+depth, collection counts, and strings are separately bounded. Keys and text
+matching authorization, cookie, password, secret, OAuth/bearer/guest/access/
+refresh token, CSRF/ct0, known-device-token, and attestation values are
+redacted. The code never reads request or response headers, cookies, WebKit
+storage, an HTTP body or body stream, or credential stores. The arm expires
+after ten minutes, an active generation expires after ninety seconds, and
+only one attempt is retained in memory. Automatic, pre-login, and ordinary
+compatibility reports continue to omit this data. Debug export explicitly
+offers a sensitive detailed report or the normal report; the detailed report
+uses a temporary file and clears the in-memory capture after a successful
+share. This beta-only module must be removed before a public release.
+
 Beta 40 stopped feeding captured WebKit instrumentation into the native
 password command and restored `uiMetrics:nil`, matching the successful beta 29
 and beta 36 reports. The following beta 40 device report still returned the

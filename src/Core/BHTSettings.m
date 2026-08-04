@@ -569,13 +569,22 @@ static NSDictionary<NSString*, NSDictionary*>* BHTSettingsPages(void) {
                 @"subtitleKey": @"MODERN_SETTINGS_DEBUG_SUBTITLE",
                 @"settings": @[
                     @{
+                        @"key": @"detailed_reply_diagnostics",
+                        @"default": @NO,
+                        @"type": @"toggle",
+                        @"excludeFromProfile": @YES,
+                        @"sectionKey": @"SETTINGS_SECTION_REPLY_DIAGNOSTICS"
+                    },
+                    @{
                         @"titleKey": @"EXPORT_COMPATIBILITY_REPORT_TITLE",
                         @"action": @"exportCompatibilityReport:",
-                        @"type": @"button"
+                        @"type": @"button",
+                        @"sectionKey": @"SETTINGS_SECTION_REPLY_DIAGNOSTICS"
                     },
                     @{@"key": @"flex_twitter",
                       @"default": @NO,
-                      @"type": @"toggle"}
+                      @"type": @"toggle",
+                      @"sectionKey": @"SETTINGS_SECTION_VIEW_INSPECTION"}
                 ]
             }
         };

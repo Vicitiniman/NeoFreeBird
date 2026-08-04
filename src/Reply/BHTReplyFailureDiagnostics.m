@@ -1,4 +1,5 @@
 #import "Reply/BHTReplyFailureDiagnostics.h"
+#import "Reply/BHTDetailedReplyDiagnostics.h"
 
 #import <dispatch/dispatch.h>
 #import <dlfcn.h>
@@ -514,6 +515,10 @@ void BHTObserveNativeReplyFailureNotification(
         @"errorObjectState":
             BHTReplyFailureErrorObjectStateNames[errorObjectState],
     });
+    BHTDetailedReplyDiagnosticsCaptureFailure(
+        sessionGeneration,
+        BHTReplyFailureSourceNames[source],
+        notification);
 }
 
 static NSDictionary* BHTReplyFailureCounterDictionary(

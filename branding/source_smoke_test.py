@@ -1186,7 +1186,7 @@ def main() -> None:
         async_report_writer,
         (
             "dispatch_async(BHTCompatibilityReportQueue(), ^{",
-            "BHTWriteCompatibilityReportNow();",
+            "BHTWriteCompatibilityReportNow(NO, nil);",
             'temporaryFileURLWithExtension:@"json"',
             "copyItemAtURL:currentReportURL",
             "toURL:snapshotURL",
@@ -2772,6 +2772,161 @@ def main() -> None:
         "decoded reply application report integration",
     )
 
+    detailed_reply_header = (
+        ROOT / "src" / "Reply" / "BHTDetailedReplyDiagnostics.h"
+    ).read_text(encoding="utf-8")
+    detailed_reply_source = (
+        ROOT / "src" / "Reply" / "BHTDetailedReplyDiagnostics.m"
+    ).read_text(encoding="utf-8")
+    debug_settings_source = (
+        ROOT / "src" / "Settings" / "Pages" /
+        "DebugSettingsViewController.m"
+    ).read_text(encoding="utf-8")
+    require_source_tokens(
+        settings_source,
+        (
+            '@"key": @"detailed_reply_diagnostics"',
+            '@"default": @NO',
+            '@"excludeFromProfile": @YES',
+            '@"SETTINGS_SECTION_REPLY_DIAGNOSTICS"',
+        ),
+        "default-off non-profile detailed reply setting",
+    )
+    require_source_tokens(
+        detailed_reply_header + detailed_reply_source,
+        (
+            "BHTArmDetailedReplyDiagnostics(void)",
+            "BHTDetailedReplyDiagnosticsCaptureDecodedResponse(",
+            "BHTDetailedReplyDiagnosticsCapturePreparedResponse(",
+            "BHTDetailedReplyDiagnosticsCaptureTypedResult(",
+            "BHTDetailedReplyDiagnosticsCaptureFailure(",
+            "BHTDetailedReplyDiagnosticSnapshot(void)",
+            "BHTDetailedReplyArmLifetime = 10.0 * 60.0",
+            "BHTDetailedReplyCaptureLifetime = 90.0",
+            "BHTDetailedReplyResponseLimit = 256 * 1024",
+            "BHTDetailedReplyMaximumDepth = 8",
+            "BHTDetailedReplyMaximumDictionaryKeys = 32",
+            "BHTDetailedReplyMaximumArrayElements = 16",
+            "BHTDetailedReplyMaximumStringLength = 2048",
+            'NSSelectorFromString(@"info")',
+            'NSSelectorFromString(@"data")',
+            "BHTDetailedReplyMethodReturnsObjectWithNoArguments(",
+            "JSONObjectWithData:data",
+            '@"overLimitOmitted"',
+            '@"nonJSONOmitted"',
+            '@"temporaryInvasiveBeta": @YES',
+            '@"containsSensitivePersonalData": @YES',
+            '@"includedOnlyByExplicitDetailedExport": @YES',
+            '@"authorizationHeaders": @YES',
+            '@"cookiesAndWebKitStorage": @YES',
+            '@"authenticationTokens": @YES',
+            '@"rawNonJSONResponseBytes": @YES',
+        ),
+        "bounded one-shot detailed reply capture",
+    )
+    for redacted_key in (
+        "authorization",
+        "cookie",
+        "password",
+        "clientsecret",
+        "accesstoken",
+        "refreshtoken",
+        "oauthtoken",
+        "bearertoken",
+        "guesttoken",
+        "token",
+        "header",
+        "csrftoken",
+        "attestation",
+        "ct0",
+    ):
+        if f'@"{redacted_key}"' not in detailed_reply_source:
+            raise AssertionError(
+                "Detailed reply capture must redact credential-like key: "
+                f"{redacted_key}"
+            )
+    for forbidden_capture_api in (
+        "allHTTPHeaderFields",
+        "valueForHTTPHeaderField",
+        "HTTPShouldHandleCookies",
+        "NSHTTPCookie",
+        "WKWebsiteDataStore",
+        "HTTPBody",
+        "HTTPBodyStream",
+        "Authorization",
+    ):
+        if forbidden_capture_api in detailed_reply_source:
+            raise AssertionError(
+                "Detailed reply capture must never inspect credentials or "
+                f"request transport state: {forbidden_capture_api}"
+            )
+    decoded_detail_position = decoded_hook_body.find(
+        "BHTDetailedReplyDiagnosticsCaptureDecodedResponse("
+    )
+    if not (
+        original_position < decoded_eligibility_position
+        < decoded_detail_position
+    ):
+        raise AssertionError(
+            "Detailed response capture must run after X's decoder and the "
+            "exact CreateTweet allowlist"
+        )
+    require_source_tokens(
+        reply_hook_source,
+        (
+            '%hook TFNTwitterCompositionUpdateStatusOperation',
+            '_tfn_main_statusesUpdateCommandDidUpdateStatus:',
+            'BHTReplyWorkflowApplicationDiagnosticWindowMayBeActive()',
+            'BHTReplyWorkflowDiagnosticSessionForApplicationResponse(',
+            'BHTDetailedReplyDiagnosticsCaptureTypedResult(',
+            '%orig(status, error);',
+            'NSClassFromString(\n        @"TFNTwitterCompositionUpdateStatusOperation")',
+            'BHTReplyDiagnosticMethodHasObjectArguments(',
+        ),
+        "guarded typed reply-result checkpoint",
+    )
+    typed_hook = source_section(
+        reply_hook_source,
+        "- (void)_tfn_main_statusesUpdateCommandDidUpdateStatus:",
+        "%end",
+        "typed reply result hook",
+    )
+    if typed_hook.count("%orig(status, error);") != 1 or (
+        typed_hook.find("BHTDetailedReplyDiagnosticsCaptureTypedResult(")
+        > typed_hook.find("%orig(status, error);")
+    ):
+        raise AssertionError(
+            "The typed result must be captured once before forwarding the "
+            "exact status/error pair unchanged"
+        )
+    require_source_tokens(
+        compatibility_report_header + compatibility_source,
+        (
+            "BHTWriteDetailedCompatibilityReportAsync(",
+            "if (includeDetailedReplyDiagnostics)",
+            '@"detailedReplyDiagnostics"',
+            "BHTDetailedReplyDiagnosticSnapshot()",
+            "BHTWriteCompatibilityReportNow(NO, nil)",
+            "BHTWriteCompatibilityReportNow(\n            YES, temporaryURL)",
+        ),
+        "explicit-only detailed compatibility report",
+    )
+    require_source_tokens(
+        debug_settings_source,
+        (
+            'isEqualToString:@"detailed_reply_diagnostics"',
+            "BHTArmDetailedReplyDiagnostics();",
+            "BHTDisarmDetailedReplyDiagnostics();",
+            "BHTDetailedReplyDiagnosticsHasCapture()",
+            "BHTWriteDetailedCompatibilityReportAsync(completion);",
+            "BHTWriteCompatibilityReportAsync(completion);",
+            "if (includeDetails && completed)",
+            "BHTClearDetailedReplyDiagnostics();",
+            "removeItemAtURL:reportURL",
+        ),
+        "confirmed detailed export and temporary-file cleanup",
+    )
+
     web_reply_header = (
         ROOT / "src" / "Reply" / "BHTWebReplyFallback.h"
     ).read_text(encoding="utf-8")
@@ -3761,11 +3916,11 @@ def main() -> None:
             "navigation delegate"
         )
 
-    if "Version: 6.1.0-beta.48" not in (
+    if "Version: 6.1.0-beta.49" not in (
         ROOT / "control"
     ).read_text(encoding="utf-8"):
         raise AssertionError(
-            "The For You filter render fallback must ship as beta.48"
+            "The one-shot detailed reply diagnostics must ship as beta.49"
         )
 
     branding_source = (
