@@ -4,6 +4,7 @@
 #import "Likes/BHTLikesTab.h"
 #import "Login/BHTCompatibilityLogin.h"
 #import "MediaActions/BHTMediaActionUtility.h"
+#import "Reply/BHTDetailedReplyDiagnostics.h"
 #import "Reply/BHTReplyApplicationDiagnostics.h"
 #import "Reply/BHTReplyFailureDiagnostics.h"
 #import "Reply/BHTReplyRequestDiagnostics.h"
@@ -1723,7 +1724,7 @@ static NSDictionary* BHTSettingsSnapshot(void) {
         @"hide_bookmark_button", @"hide_downvote_button",
         @"disable_sensitive_tweet_warnings", @"bypass_age_verification",
         @"reply_sorting", @"restore_reply_context", @"restore_tweet_labels",
-        @"web_reply_fallback",
+        @"web_reply_fallback", @"detailed_reply_diagnostics",
         @"no_history", @"hide_trends", @"hide_trend_videos",
         @"restore_twitter_names", @"refresh_pill_label",
         @"color_twitter_icon_in_top_bar", @"disable_screenshot_detection",
@@ -1773,7 +1774,9 @@ static NSDictionary* BHTMediaActionSettingsSnapshot(void) {
     };
 }
 
-static NSURL* BHTWriteCompatibilityReportNow(void) {
+static NSURL* BHTWriteCompatibilityReportNow(
+    BOOL includeDetailedReplyDiagnostics,
+    NSURL* destinationURL) {
     NSArray* probes = BHTRuntimeProbes();
     NSUInteger available = 0;
     NSMutableDictionary<NSString*, NSMutableDictionary*>* featureSummary =
@@ -1792,7 +1795,7 @@ static NSURL* BHTWriteCompatibilityReportNow(void) {
     }
 
     NSBundle* app = NSBundle.mainBundle;
-    NSDictionary* report = @{
+    NSMutableDictionary* report = [@{
         @"generatedAt": [[NSISO8601DateFormatter new] stringFromDate:NSDate.date],
         @"app": @{
             @"bundleID": app.bundleIdentifier ?: @"",
@@ -1856,14 +1859,19 @@ static NSURL* BHTWriteCompatibilityReportNow(void) {
         @"railBrandingRuntime": BHTRailBrandingObservationSnapshot(),
         @"themeRuntime": BHTThemeRuntimeObservationSnapshot(),
         @"probes": probes
-    };
+    } mutableCopy];
+    if (includeDetailedReplyDiagnostics) {
+        report[@"detailedReplyDiagnostics"] =
+            BHTDetailedReplyDiagnosticSnapshot();
+    }
 
     NSData* data = [NSJSONSerialization dataWithJSONObject:report
                                                    options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys
                                                      error:nil];
     if (!data) return nil;
 
-    NSURL* reportURL = BHTCompatibilityReportURL();
+    NSURL* reportURL =
+        destinationURL ?: BHTCompatibilityReportURL();
     BOOL wroteReport =
         [data writeToURL:reportURL
                  options:NSDataWritingAtomic
@@ -1872,14 +1880,14 @@ static NSURL* BHTWriteCompatibilityReportNow(void) {
 }
 
 void BHTWriteCompatibilityReport(void) {
-    (void)BHTWriteCompatibilityReportNow();
+    (void)BHTWriteCompatibilityReportNow(NO, nil);
 }
 
 void BHTWriteCompatibilityReportAsync(
     void (^completion)(NSURL* _Nullable reportURL)) {
     dispatch_async(BHTCompatibilityReportQueue(), ^{
         NSURL* currentReportURL =
-            BHTWriteCompatibilityReportNow();
+            BHTWriteCompatibilityReportNow(NO, nil);
         NSURL* reportURL = nil;
         if (currentReportURL) {
             NSURL* snapshotURL =
@@ -1897,6 +1905,24 @@ void BHTWriteCompatibilityReportAsync(
                     removeItemAtURL:snapshotURL
                               error:nil];
             }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(reportURL);
+        });
+    });
+}
+
+void BHTWriteDetailedCompatibilityReportAsync(
+    void (^completion)(NSURL* _Nullable reportURL)) {
+    dispatch_async(BHTCompatibilityReportQueue(), ^{
+        NSURL* temporaryURL =
+            [BHTManager temporaryFileURLWithExtension:@"json"];
+        NSURL* reportURL = BHTWriteCompatibilityReportNow(
+            YES, temporaryURL);
+        if (!reportURL) {
+            [NSFileManager.defaultManager
+                removeItemAtURL:temporaryURL
+                          error:nil];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) completion(reportURL);

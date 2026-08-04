@@ -3,12 +3,14 @@
 //  NeoFreeBird
 //
 //  X 12.9-only observation of decoded and prepared CreateTweet results. X's
-//  decoder/preparation runs first. The diagnostic then records fixed presence
-//  categories only; decoded objects, error contents, URLs, identifiers, and
-//  account data never leave this stack frame.
+//  decoder/preparation runs first. The standard diagnostic records fixed
+//  presence categories only. A separately confirmed one-shot beta diagnostic
+//  may also retain a bounded, credential-redacted CreateTweet JSON snapshot;
+//  it is available only through the explicit detailed export path.
 //
 
 #import "Compatibility/BHTCompatibilityReporter.h"
+#import "Reply/BHTDetailedReplyDiagnostics.h"
 #import "Reply/BHTReplyApplicationDiagnostics.h"
 
 #import <objc/message.h>
@@ -214,8 +216,10 @@ static BOOL BHTReplyApplicationGetObject(
         id decodedAPIErrors = APIErrors ? *APIErrors : nil;
         BHTNativeReplyModelStructureState modelStructureState =
             BHTNativeReplyModelStructureStateLayoutUnavailable;
-        if (BHTNativeReplyApplicationRequestURLIsEligible(
-                requestURL)) {
+        BOOL eligible =
+            BHTNativeReplyApplicationRequestURLIsEligible(
+                requestURL);
+        if (eligible) {
             modelStructureState =
                 BHTReplyApplicationModelStructureState(model);
         }
@@ -223,6 +227,11 @@ static BOOL BHTReplyApplicationGetObject(
             sessionGeneration, requestURL, model,
             decodedParseError, decodedAPIErrors,
             modelStructureState);
+        if (eligible) {
+            BHTDetailedReplyDiagnosticsCaptureDecodedResponse(
+                sessionGeneration, self, model,
+                decodedParseError, decodedAPIErrors);
+        }
     } @catch (__unused NSException* exception) {
     }
     return model;
@@ -296,6 +305,17 @@ static BOOL BHTReplyApplicationGetObject(
         BHTRecordNativeReplyPreparedResponse(
             sessionGeneration,
             requestURL,
+            observationComplete,
+            effectiveModel,
+            effectiveParseError,
+            effectiveOperationError,
+            effectiveAPIErrors,
+            finalModel,
+            finalParseError,
+            finalOperationError,
+            finalAPIErrors);
+        BHTDetailedReplyDiagnosticsCapturePreparedResponse(
+            sessionGeneration,
             observationComplete,
             effectiveModel,
             effectiveParseError,

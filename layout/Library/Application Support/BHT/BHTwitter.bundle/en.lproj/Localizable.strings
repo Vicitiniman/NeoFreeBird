@@ -591,6 +591,18 @@
 "HIDE_SCREENSHOT_BRANDING_DETAIL" = "Hide X's custom overlay on timeline screenshots.";
 "EXPORT_COMPATIBILITY_REPORT_TITLE" = "Export compatibility report";
 "EXPORT_COMPATIBILITY_REPORT_DETAIL" = "Share the X 12.9 runtime hook report for troubleshooting.";
+"DETAILED_REPLY_DIAGNOSTICS_TITLE" = "Detailed reply diagnostics (one reply)";
+"DETAILED_REPLY_DIAGNOSTICS_DETAIL" = "Temporary testing mode. Captures personal CreateTweet response and error details for the next native reply, then turns itself off.";
+"DETAILED_REPLY_DIAGNOSTICS_WARNING_TITLE" = "Capture detailed reply diagnostics?";
+"DETAILED_REPLY_DIAGNOSTICS_WARNING_MESSAGE" = "The next native reply may record reply text returned by X, your account handle and ID, post or media IDs, GraphQL response data, and private X error descriptions. Passwords, authentication tokens, cookies, and authentication headers are always excluded. Do not put secrets in the test reply. The capture turns itself off after one reply and is only for this beta.";
+"DETAILED_REPLY_DIAGNOSTICS_ENABLE_ONCE" = "Enable Once";
+"DETAILED_REPLY_DIAGNOSTICS_CANCEL" = "Cancel";
+"DETAILED_REPLY_DIAGNOSTICS_EXPORT_WARNING_TITLE" = "This report contains personal reply data";
+"DETAILED_REPLY_DIAGNOSTICS_EXPORT_WARNING_MESSAGE" = "The detailed section can identify your account and the post you replied to. It still excludes passwords, tokens, cookies, request headers, and authentication headers. Review the JSON before sharing it.";
+"DETAILED_REPLY_DIAGNOSTICS_SHARE_DETAILED" = "Share Detailed Report";
+"DETAILED_REPLY_DIAGNOSTICS_SHARE_STANDARD" = "Share Standard Report";
+"DETAILED_REPLY_DIAGNOSTICS_EXPORT_ERROR_TITLE" = "Report unavailable";
+"DETAILED_REPLY_DIAGNOSTICS_EXPORT_ERROR_MESSAGE" = "NeoFreeBird could not create the compatibility report.";
 "MY_LIKES_TITLE" = "My Likes";
 "LIKES_POSTS_SEGMENT" = "Posts";
 "LIKES_MEDIA_SEGMENT" = "Media";
@@ -613,6 +625,8 @@
 "SETTINGS_SECTION_COMPOSING" = "Composing";
 "SETTINGS_SECTION_INTERACTIONS" = "Interactions";
 "SETTINGS_SECTION_SAFETY_CONTEXT" = "Safety and context";
+"SETTINGS_SECTION_REPLY_DIAGNOSTICS" = "Reply diagnostics";
+"SETTINGS_SECTION_VIEW_INSPECTION" = "View inspection";
 "SETTINGS_SECTION_PROFILE_ACTIONS" = "Profile actions";
 "SETTINGS_SECTION_PROFILE_TABS" = "Profile tabs";
 "SETTINGS_SECTION_PROFILE_APPEARANCE" = "Profile appearance";
