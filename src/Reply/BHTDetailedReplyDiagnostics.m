@@ -7,7 +7,8 @@
 #import <objc/runtime.h>
 
 static const NSTimeInterval BHTDetailedReplyArmLifetime = 10.0 * 60.0;
-static const NSTimeInterval BHTDetailedReplyCaptureLifetime = 90.0;
+static const NSTimeInterval BHTDetailedReplyCollectionLifetime = 90.0;
+static const NSTimeInterval BHTDetailedReplyExportLifetime = 10.0 * 60.0;
 static const NSUInteger BHTDetailedReplyResponseLimit = 256 * 1024;
 static const NSUInteger BHTDetailedReplyMaximumDepth = 8;
 static const NSUInteger BHTDetailedReplyMaximumDictionaryKeys = 32;
@@ -49,14 +50,31 @@ static void BHTDetailedReplyPruneLocked(void) {
         BHTDetailedReplyCaptureState = @"armExpired";
         BHTDetailedReplySetPreference(NO);
     }
-    if (BHTDetailedReplySessionGeneration != 0 &&
-        now - BHTDetailedReplyCaptureStartedAt >
-            BHTDetailedReplyCaptureLifetime) {
+    NSTimeInterval captureAge =
+        BHTDetailedReplyCaptureStartedAt > 0
+            ? now - BHTDetailedReplyCaptureStartedAt
+            : 0;
+    if (captureAge > BHTDetailedReplyExportLifetime) {
+        // Personal reply data is retained only long enough for the tester to
+        // return to Debug settings and explicitly share the detailed report.
+        BHTDetailedReplySessionGeneration = 0;
+        BHTDetailedReplyCaptureStartedAt = 0;
+        BHTDetailedReplyCapture = nil;
+        BHTDetailedReplyRedactionCount = 0;
+        BHTDetailedReplyTruncationCount = 0;
+        BHTDetailedReplyResponseAccessorsObserved = NO;
+        BHTDetailedReplyCaptureState = @"captureExpiredAndCleared";
+    } else if (BHTDetailedReplySessionGeneration != 0 &&
+               captureAge > BHTDetailedReplyCollectionLifetime) {
+        // Stop accepting late callbacks after 90 seconds, while allowing the
+        // completed one-shot report to be exported for up to ten minutes.
         BHTDetailedReplySessionGeneration = 0;
         if (BHTDetailedReplyCapture) {
-            BHTDetailedReplyCaptureState = @"captureExpiredWithData";
+            BHTDetailedReplyCaptureState =
+                @"captureCollectionClosedAwaitingExport";
         } else {
-            BHTDetailedReplyCaptureState = @"captureExpired";
+            BHTDetailedReplyCaptureStartedAt = 0;
+            BHTDetailedReplyCaptureState = @"captureExpiredWithoutData";
         }
     }
 }
@@ -357,6 +375,7 @@ void BHTArmDetailedReplyDiagnostics(void) {
         BHTDetailedReplyCapture = nil;
         BHTDetailedReplyRedactionCount = 0;
         BHTDetailedReplyTruncationCount = 0;
+        BHTDetailedReplyResponseAccessorsObserved = NO;
         BHTDetailedReplyCaptureState = @"armedForNextNativeReply";
         BHTDetailedReplySetPreference(YES);
     }
@@ -401,6 +420,7 @@ void BHTClearDetailedReplyDiagnostics(void) {
         BHTDetailedReplyCapture = nil;
         BHTDetailedReplyRedactionCount = 0;
         BHTDetailedReplyTruncationCount = 0;
+        BHTDetailedReplyResponseAccessorsObserved = NO;
         BHTDetailedReplyCaptureState = @"cleared";
         BHTDetailedReplySetPreference(NO);
     }
@@ -665,8 +685,10 @@ NSDictionary* BHTDetailedReplyDiagnosticSnapshot(void) {
             @"limits": @{
                 @"attempts": @1,
                 @"armLifetimeSeconds": @(BHTDetailedReplyArmLifetime),
-                @"captureLifetimeSeconds":
-                    @(BHTDetailedReplyCaptureLifetime),
+                @"collectionLifetimeSeconds":
+                    @(BHTDetailedReplyCollectionLifetime),
+                @"exportLifetimeSeconds":
+                    @(BHTDetailedReplyExportLifetime),
                 @"responseBytes": @(BHTDetailedReplyResponseLimit),
                 @"maximumDepth": @(BHTDetailedReplyMaximumDepth),
                 @"dictionaryKeys":
